@@ -2,17 +2,38 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PLUGIN="${ROOT}/build-llvm22/obfuscation/libHikari.dylib"
 LLVM_BIN="${LLVM_BIN:-/opt/homebrew/opt/llvm/bin}"
 OUT="${ROOT}/samples/out"
 PASSES="${PASSES:-hikari(enable-bcfobf,enable-cffobf,enable-subobf,enable-splitobf,enable-strcry,enable-indibran)}"
 
+if [[ -z "${PLUGIN:-}" ]]; then
+  for cand in \
+    "${ROOT}/build/obfuscation/libHikari.dylib" \
+    "${ROOT}/build-llvm22/obfuscation/libHikari.dylib" \
+    "${ROOT}/build/obfuscation/libHikari.so" \
+    "${ROOT}/build-llvm22/obfuscation/libHikari.so"; do
+    if [[ -f "$cand" ]]; then
+      PLUGIN="$cand"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${PLUGIN:-}" || ! -f "$PLUGIN" ]]; then
+  echo "error: libHikari not found. Build the plugin first, e.g.:" >&2
+  echo "  cmake -G Ninja -S . -B build -DLT_LLVM_INSTALL_DIR=/opt/homebrew/opt/llvm && cmake --build build" >&2
+  echo "Or set PLUGIN=/path/to/libHikari.dylib" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT"
 export PATH="$LLVM_BIN:$PATH"
 
-echo "==> LLVM: $(llvm-config --version)"
+echo "==> LLVM: $(llvm-config --version 2>/dev/null || echo unknown)"
 echo "==> Plugin: $PLUGIN"
 echo "==> Passes: $PASSES"
+echo "==> Note: Objective-C support has been removed from this plugin."
+
 
 ############################################
 # C sample
