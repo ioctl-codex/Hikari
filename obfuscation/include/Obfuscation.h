@@ -1,7 +1,6 @@
 #ifndef _OBFUSCATION_H_
 #define _OBFUSCATION_H_
 
-#include "include/AntiClassDump.h"
 #include "include/AntiDebugging.h"
 #include "include/AntiHook.h"
 #include "include/BogusControlFlow.h"

@@ -26,7 +26,6 @@ namespace llvm {
 struct StringEncryption : public ModulePass {
   static char ID;
   bool flag;
-  bool appleptrauth;
   bool opaquepointers;
   std::unordered_map<Function * /*Function*/,
                      GlobalVariable * /*Decryption Status*/>
@@ -66,7 +65,6 @@ struct StringEncryption : public ModulePass {
   bool runOnModule(Module &M) override {
     // in runOnModule. We simple iterate function list and dispatch functions
     // to handlers
-    this->appleptrauth = hasApplePtrauth(&M);
 #if LLVM_VERSION_MAJOR >= 17
     this->opaquepointers = true;
 #else
@@ -168,7 +166,6 @@ struct StringEncryption : public ModulePass {
         HandleUser(&I, Globals, Users, VisitedUsers);
     }
     std::unordered_set<GlobalVariable *> rawStrings;
-    std::unordered_set<GlobalVariable *> objCStrings;
     std::unordered_map<GlobalVariable *,
                        std::pair<Constant *, GlobalVariable *>>
         GV2Keys;
@@ -203,14 +200,11 @@ struct StringEncryption : public ModulePass {
                 breakThisFor = true;
               }
             }
+            // Objective-C / CFString support intentionally removed.
             if (GV->getInitializer()->getType() ==
                 StructType::getTypeByName(M->getContext(),
                                           "struct.__NSConstantString_tag")) {
-              objCStrings.insert(GV);
-              rawStrings.insert(cast<GlobalVariable>(
-                  cast<ConstantStruct>(GV->getInitializer())
-                      ->getOperand(2)
-                      ->stripPointerCasts()));
+              unhandleablegvs.emplace_back(GV);
             } else if (isa<ConstantDataSequential>(GV->getInitializer())) {
               rawStrings.insert(GV);
             } else if (ConstantAggregate *CA =
@@ -230,18 +224,7 @@ struct StringEncryption : public ModulePass {
     for (GlobalVariable *ugv : unhandleablegvs)
       if (std::find(genedgv.begin(), genedgv.end(), ugv) != genedgv.end()) {
         std::pair<Constant *, GlobalVariable *> mgv2keysval = mgv2keys[ugv];
-        if (ugv->getInitializer()->getType() ==
-            StructType::getTypeByName(M->getContext(),
-                                      "struct.__NSConstantString_tag")) {
-          GlobalVariable *rawgv =
-              cast<GlobalVariable>(cast<ConstantStruct>(ugv->getInitializer())
-                                       ->getOperand(2)
-                                       ->stripPointerCasts());
-          mgv2keysval = mgv2keys[rawgv];
-          if (mgv2keysval.first && mgv2keysval.second) {
-            GV2Keys[rawgv] = mgv2keysval;
-          }
-        } else if (mgv2keysval.first && mgv2keysval.second) {
+        if (mgv2keysval.first && mgv2keysval.second) {
           GV2Keys[ugv] = mgv2keysval;
         }
       }
@@ -388,22 +371,6 @@ struct StringEncryption : public ModulePass {
       globalProcessedGVs.insert(GV);
       old2new[GV] = globalOld2New[GV];
     }
-    // Now prepare ObjC new GV
-    for (GlobalVariable *GV : objCStrings) {
-      ConstantStruct *CS = cast<ConstantStruct>(GV->getInitializer());
-      GlobalVariable *oldrawString =
-          cast<GlobalVariable>(CS->getOperand(2)->stripPointerCasts());
-      if (old2new.find(oldrawString) ==
-          old2new.end()) // Filter out zero initializers
-        continue;
-      GlobalVariable *EncryptedOCGV = ObjectiveCString(
-          GV, "EncryptedStringObjC", old2new[oldrawString].first, CS);
-      genedgv.emplace_back(EncryptedOCGV);
-      GlobalVariable *DecryptSpaceOCGV = ObjectiveCString(
-          GV, "DecryptSpaceObjC", old2new[oldrawString].second, CS);
-      genedgv.emplace_back(DecryptSpaceOCGV);
-      old2new[GV] = std::make_pair(EncryptedOCGV, DecryptSpaceOCGV);
-    } // End prepare ObjC new GV
     if (GV2Keys.empty())
       return;
     // Replace Uses
@@ -425,55 +392,6 @@ struct StringEncryption : public ModulePass {
         iter->first->removeDeadConstantUsers();
       }
     } // End Replace Uses
-    // CleanUp Old ObjC GVs
-    for (GlobalVariable *GV : objCStrings) {
-      GlobalVariable *PtrauthGV = nullptr;
-      if (appleptrauth) {
-        Constant *C = dyn_cast_or_null<Constant>(
-            opaquepointers
-                ? GV->getInitializer()
-                : cast<ConstantExpr>(GV->getInitializer()->getOperand(0)));
-        if (C) {
-          PtrauthGV = dyn_cast<GlobalVariable>(C->getOperand(0));
-          if (PtrauthGV->getSection() == "llvm.ptrauth") {
-            if (ConstantExpr *CE = dyn_cast<ConstantExpr>(
-                    PtrauthGV->getInitializer()->getOperand(2))) {
-              if (GlobalVariable *GV2 =
-                      dyn_cast<GlobalVariable>(CE->getOperand(0))) {
-                if (GV->getNumUses() <= 1 &&
-                    GV2 == GV)
-                  PtrauthGV->getInitializer()->setOperand(
-                      2, ConstantExpr::getPtrToInt(
-                             M->getGlobalVariable(
-                                 "__CFConstantStringClassReference"),
-                             Type::getInt64Ty(M->getContext())));
-              }
-            } else if (GlobalVariable *GV2 = dyn_cast<GlobalVariable>(
-                           PtrauthGV->getInitializer()->getOperand(2)))
-              if (GV->getNumUses() <= 1 &&
-                  GV2 == GV)
-                PtrauthGV->getInitializer()->setOperand(
-                    2, ConstantExpr::getPtrToInt(
-                           M->getGlobalVariable(
-                               "__CFConstantStringClassReference"),
-                           Type::getInt64Ty(M->getContext())));
-          }
-        }
-      }
-      GV->removeDeadConstantUsers();
-      if (GV->getNumUses() == 0) {
-        GV->dropAllReferences();
-        old2new.erase(GV);
-        GV->eraseFromParent();
-      }
-      if (PtrauthGV) {
-        PtrauthGV->removeDeadConstantUsers();
-        if (PtrauthGV->getNumUses() == 0) {
-          PtrauthGV->dropAllReferences();
-          PtrauthGV->eraseFromParent();
-        }
-      }
-    }
     // Cleanup at the end of encryption to avoid wild pointers
     // CleanUp Old Raw GVs
     // for (std::unordered_map<
@@ -529,58 +447,6 @@ struct StringEncryption : public ModulePass {
     SI->setAlignment(Align(4));
     SI->setAtomic(AtomicOrdering::Release); // Release the lock acquired in LI
   } // End of HandleFunction
-
-  GlobalVariable *ObjectiveCString(GlobalVariable *GV, std::string name,
-                                   GlobalVariable *newString,
-                                   ConstantStruct *CS) {
-    Value *zero = ConstantInt::get(Type::getInt32Ty(GV->getContext()), 0);
-    SmallVector<Constant *, 4> vals;
-    vals.emplace_back(CS->getOperand(0));
-    vals.emplace_back(CS->getOperand(1));
-    Constant *GEPed = ConstantExpr::getInBoundsGetElementPtr(
-        newString->getValueType(), newString, {zero, zero});
-    if (GEPed->getType() == CS->getOperand(2)->getType()) {
-      vals.emplace_back(GEPed);
-    } else {
-      Constant *BitCasted =
-          ConstantExpr::getBitCast(newString, CS->getOperand(2)->getType());
-      vals.emplace_back(BitCasted);
-    }
-    vals.emplace_back(CS->getOperand(3));
-    Constant *newCS =
-        ConstantStruct::get(CS->getType(), ArrayRef<Constant *>(vals));
-    GlobalVariable *ObjcGV = new GlobalVariable(
-        *(GV->getParent()), newCS->getType(), false, GV->getLinkage(), newCS,
-        name, nullptr, GV->getThreadLocalMode(),
-        GV->getType()->getAddressSpace());
-    // for arm64e target on Apple LLVM
-    if (appleptrauth) {
-      Constant *C = dyn_cast_or_null<Constant>(
-          opaquepointers ? newCS : cast<ConstantExpr>(newCS->getOperand(0)));
-      GlobalVariable *PtrauthGV = dyn_cast<GlobalVariable>(C->getOperand(0));
-      if (PtrauthGV && PtrauthGV->getSection() == "llvm.ptrauth") {
-        GlobalVariable *NewPtrauthGV = new GlobalVariable(
-            *PtrauthGV->getParent(), PtrauthGV->getValueType(), true,
-            PtrauthGV->getLinkage(),
-            ConstantStruct::getAnon(
-                {(Constant *)PtrauthGV->getInitializer()->getOperand(0),
-                 (ConstantInt *)PtrauthGV->getInitializer()->getOperand(1),
-                 ConstantExpr::getPtrToInt(
-                     ObjcGV, Type::getInt64Ty(ObjcGV->getContext())),
-                 (ConstantInt *)PtrauthGV->getInitializer()->getOperand(3)},
-                false),
-            PtrauthGV->getName(), nullptr, PtrauthGV->getThreadLocalMode());
-        NewPtrauthGV->setSection("llvm.ptrauth");
-        NewPtrauthGV->setAlignment(Align(8));
-        ObjcGV->getInitializer()->setOperand(
-            0,
-            ConstantExpr::getBitCast(
-                NewPtrauthGV,
-                PointerType::get(NewPtrauthGV->getContext(), 0)));
-      }
-    }
-    return ObjcGV;
-  }
 
   void HandleDecryptionBlock(
       BasicBlock *B, BasicBlock *C,

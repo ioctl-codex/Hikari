@@ -73,8 +73,7 @@ void fixStack(Function *f) {
   } while (tmpReg.size() != 0 || tmpPhi.size() != 0);
 }
 
-// Unlike O-LLVM which uses __attribute__ that is not supported by the ObjC
-// CFE. We use a dummy call here and remove the call later Very dumb and
+// Unlike O-LLVM which uses __attribute__. We use a dummy call here and remove the call later Very dumb and
 // definitely slower than the function attribute method Merely a hack
 bool readFlag(Function *f, std::string attribute) {
   for (Instruction &I : instructions(f)) {
@@ -228,12 +227,6 @@ bool toObfuscateUint32Option(Function *f, std::string option, uint32_t *val) {
   return false;
 }
 
-bool hasApplePtrauth(Module *M) {
-  for (GlobalVariable &GV : M->globals())
-    if (GV.getSection() == "llvm.ptrauth")
-      return true;
-  return false;
-}
 
 void FixBasicBlockConstantExpr(BasicBlock *BB) {
   // Replace ConstantExpr with equal instructions

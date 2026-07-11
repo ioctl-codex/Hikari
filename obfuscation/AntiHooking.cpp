@@ -59,11 +59,6 @@ static cl::opt<bool> CheckInlineHook("ah_inline", cl::init(true), cl::NotHidden,
                                      cl::desc("Check Inline Hook for AArch64"));
 static bool CheckInlineHookTemp = true;
 
-static cl::opt<bool>
-    CheckObjectiveCRuntimeHook("ah_objcruntime", cl::init(true), cl::NotHidden,
-                               cl::desc("Check Objective-C Runtime Hook"));
-static bool CheckObjectiveCRuntimeHookTemp = true;
-
 static cl::opt<bool> AntiRebindSymbol("ah_antirebind", cl::init(false),
                                       cl::NotHidden,
                                       cl::desc("Make fishhook unavailable"));
@@ -116,30 +111,6 @@ struct AntiHook : public ModulePass {
     opaquepointers = !M.getContext().supportsTypedPointers();
 #endif
 
-    if (triple.getVendor() == Triple::VendorType::Apple &&
-        StructType::getTypeByName(M.getContext(), "struct._objc_method")) {
-      Type *Int8PtrTy = PointerType::get(M.getContext(), 0);
-      M.getOrInsertFunction("objc_getClass",
-                            FunctionType::get(Int8PtrTy, {Int8PtrTy}, false));
-      M.getOrInsertFunction("sel_registerName",
-                            FunctionType::get(Int8PtrTy, {Int8PtrTy}, false));
-      FunctionType *IMPType =
-          FunctionType::get(Int8PtrTy, {Int8PtrTy, Int8PtrTy}, true);
-      PointerType *IMPPointerType = PointerType::get(IMPType->getContext(), 0);
-      M.getOrInsertFunction(
-          "method_getImplementation",
-          FunctionType::get(IMPPointerType,
-                            {PointerType::get(M.getContext(), 0)},
-                            false));
-      M.getOrInsertFunction(
-          "class_getInstanceMethod",
-          FunctionType::get(PointerType::get(M.getContext(), 0),
-                            {Int8PtrTy, Int8PtrTy}, false));
-      M.getOrInsertFunction(
-          "class_getClassMethod",
-          FunctionType::get(PointerType::get(M.getContext(), 0),
-                            {Int8PtrTy, Int8PtrTy}, false));
-    }
     return true;
   }
 
@@ -188,67 +159,6 @@ struct AntiHook : public ModulePass {
                 CS.setCalledFunction(BitCasted);
               }
             }
-        if (!toObfuscateBoolOption(&F, "ah_objcruntime",
-                                   &CheckObjectiveCRuntimeHookTemp))
-          CheckObjectiveCRuntimeHookTemp = CheckObjectiveCRuntimeHook;
-        if (!CheckObjectiveCRuntimeHookTemp)
-          continue;
-        GlobalVariable *methodListGV = nullptr;
-        ConstantStruct *methodStruct = nullptr;
-        for (User *U : F.users()) {
-          if (opaquepointers)
-            if (ConstantStruct *CS = dyn_cast<ConstantStruct>(U))
-              if (CS->getType()->getName() == "struct._objc_method")
-                methodStruct = CS;
-          for (User *U2 : U->users()) {
-            if (!opaquepointers)
-              if (ConstantStruct *CS = dyn_cast<ConstantStruct>(U2))
-                if (CS->getType()->getName() == "struct._objc_method")
-                  methodStruct = CS;
-            for (User *U3 : U2->users())
-              for (User *U4 : U3->users()) {
-                if (opaquepointers) {
-#if LLVM_VERSION_MAJOR >= 18
-                  if (U4->getName().starts_with("_OBJC_$_INSTANCE_METHODS") ||
-                      U4->getName().starts_with("_OBJC_$_CLASS_METHODS"))
-                    methodListGV = dyn_cast<GlobalVariable>(U4);
-                } else
-                  for (User *U5 : U4->users()) {
-                    if (U5->getName().starts_with("_OBJC_$_INSTANCE_METHODS") ||
-                        U5->getName().starts_with("_OBJC_$_CLASS_METHODS"))
-#else
-                  if (U4->getName().startswith("_OBJC_$_INSTANCE_METHODS") ||
-                      U4->getName().startswith("_OBJC_$_CLASS_METHODS"))
-                    methodListGV = dyn_cast<GlobalVariable>(U4);
-                } else
-                  for (User *U5 : U4->users()) {
-                    if (U5->getName().startswith("_OBJC_$_INSTANCE_METHODS") ||
-                        U5->getName().startswith("_OBJC_$_CLASS_METHODS"))
-#endif
-                      methodListGV = dyn_cast<GlobalVariable>(U5);
-                  }
-              }
-          }
-        }
-        if (methodListGV && methodStruct) {
-          GlobalVariable *SELNameGV = cast<GlobalVariable>(
-              methodStruct->getOperand(0)->stripPointerCasts());
-          ConstantDataSequential *SELNameCDS =
-              cast<ConstantDataSequential>(SELNameGV->getInitializer());
-          bool classmethod =
-#if LLVM_VERSION_MAJOR >= 18
-              methodListGV->getName().starts_with("_OBJC_$_CLASS_METHODS");
-#else
-              methodListGV->getName().startswith("_OBJC_$_CLASS_METHODS");
-#endif
-          std::string classname =
-              methodListGV->getName()
-                  .substr(strlen(classmethod ? "_OBJC_$_CLASS_METHODS_"
-                                             : "_OBJC_$_INSTANCE_METHODS_"))
-                  .str();
-          std::string selname = SELNameCDS->getAsCString().str();
-          HandleObjcRuntimeHook(&F, classname, selname, classmethod);
-        }
       }
     }
     return true;
@@ -303,46 +213,6 @@ struct AntiHook : public ModulePass {
     CreateCallbackAndJumpBack(&IRBB, C);
   }
 
-  void HandleObjcRuntimeHook(Function *ObjcMethodImp, std::string classname,
-                             std::string selname, bool classmethod) {
-    /*
-    We split the originalBB A into:
-       A < - RuntimeHook Detection
-       | \
-       |  B for handler()
-       | /
-       C < - Original Following BB
-    */
-    Module *M = ObjcMethodImp->getParent();
-
-    BasicBlock *A = &(ObjcMethodImp->getEntryBlock());
-    BasicBlock *C = A->splitBasicBlock(A->getFirstNonPHIOrDbgOrLifetime());
-    BasicBlock *B = BasicBlock::Create(A->getContext(), "HookDetectedHandler",
-                                       ObjcMethodImp, C);
-    // Delete A's terminator
-    A->getTerminator()->eraseFromParent();
-
-    IRBuilder<> IRBA(A);
-    IRBuilder<> IRBB(B);
-
-    Type *Int8PtrTy = PointerType::get(M->getContext(), 0);
-
-    Value *GetClass = IRBA.CreateCall(M->getFunction("objc_getClass"),
-                                      {IRBA.CreateGlobalString(classname)});
-    Value *GetSelector = IRBA.CreateCall(M->getFunction("sel_registerName"),
-                                         {IRBA.CreateGlobalString(selname)});
-    Value *GetMethod =
-        IRBA.CreateCall(M->getFunction(classmethod ? "class_getClassMethod"
-                                                   : "class_getInstanceMethod"),
-                        {GetClass, GetSelector});
-    Value *GetMethodImp = IRBA.CreateCall(
-        M->getFunction("method_getImplementation"), {GetMethod});
-    Value *IcmpEq =
-        IRBA.CreateICmpEQ(IRBA.CreateBitCast(GetMethodImp, Int8PtrTy),
-                          ConstantExpr::getBitCast(ObjcMethodImp, Int8PtrTy));
-    IRBA.CreateCondBr(IcmpEq, C, B);
-    CreateCallbackAndJumpBack(&IRBB, C);
-  }
   void CreateCallbackAndJumpBack(IRBuilder<> *IRBB, BasicBlock *C) {
     Module *M = C->getModule();
     Function *AHCallBack = M->getFunction("AHCallBack");

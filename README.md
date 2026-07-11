@@ -85,9 +85,10 @@ clang output.o -o output
 | `enable-indibran` | 间接跳转 |
 | `enable-fco` | 函数调用混淆 |
 | `enable-funcwra` | 函数包装 |
-| `enable-acdobf` | AntiClassDump |
-| `enable-antihook` | AntiHooking |
+| `enable-antihook` | AntiHooking（inline / antirebind；已移除 ObjC runtime hook） |
 | `enable-adb` | AntiDebugging |
+
+> **Objective-C 支持已移除**（无测试环境）：`AntiClassDump`、`FCO` 的 ObjC class/sel 处理、`strcry` 的 CFString/NSString、`antihook` 的 ObjC runtime 检测均已删除。面向 C / Rust / 普通 LLVM IR。
 
 ## LLVM 22 移植说明
 
@@ -101,6 +102,7 @@ clang output.o -o output
 - `CreateGlobalStringPtr` → `CreateGlobalString`
 - iterator 插入点 / `getFirstNonPHIOrDbgOrLifetime` 等 API 适配
 - Flattening / IndirectBranch 使用自带 `LegacyLowerSwitch`，避免 out-of-tree 插件与 host AnalysisKey 不匹配
+- 移除 Objective-C 相关逻辑（AntiClassDump / FCO-ObjC / CFString / ah_objcruntime）
 
 ## 感谢
 [Hikari-LLVM15](https://github.com/61bcdefg/Hikari-LLVM15) By 61bcdefg

@@ -72,30 +72,6 @@ struct FunctionCallObfuscate : public FunctionPass {
              << "\n";
     }
     this->triple = Triple(M.getTargetTriple());
-    if (triple.getVendor() == Triple::VendorType::Apple) {
-      Type *Int8PtrTy = PointerType::get(M.getContext(), 0);
-      // Generic ObjC Runtime Declarations
-      FunctionType *IMPType =
-          FunctionType::get(Int8PtrTy, {Int8PtrTy, Int8PtrTy}, true);
-      PointerType *IMPPointerType = PointerType::get(IMPType->getContext(), 0);
-      FunctionType *class_replaceMethod_type = FunctionType::get(
-          IMPPointerType, {Int8PtrTy, Int8PtrTy, IMPPointerType, Int8PtrTy},
-          false);
-      M.getOrInsertFunction("class_replaceMethod", class_replaceMethod_type);
-      FunctionType *sel_registerName_type =
-          FunctionType::get(Int8PtrTy, {Int8PtrTy}, false);
-      M.getOrInsertFunction("sel_registerName", sel_registerName_type);
-      FunctionType *objc_getClass_type =
-          FunctionType::get(Int8PtrTy, {Int8PtrTy}, false);
-      M.getOrInsertFunction("objc_getClass", objc_getClass_type);
-      M.getOrInsertFunction("objc_getMetaClass", objc_getClass_type);
-      FunctionType *class_getName_Type =
-          FunctionType::get(Int8PtrTy, {Int8PtrTy}, false);
-      M.getOrInsertFunction("class_getName", class_getName_Type);
-      FunctionType *objc_getMetaClass_Type =
-          FunctionType::get(Int8PtrTy, {Int8PtrTy}, false);
-      M.getOrInsertFunction("objc_getMetaClass", objc_getMetaClass_Type);
-    }
     this->initialized = true;
 #if LLVM_VERSION_MAJOR >= 17
     this->opaquepointers = true;
@@ -105,153 +81,6 @@ struct FunctionCallObfuscate : public FunctionPass {
     return true;
   }
 
-  bool OnlyUsedByCompilerUsed(GlobalVariable *GV) {
-    if (GV->getNumUses() == 1) {
-      User *U = GV->user_back();
-      if (U->getNumUses() == 1) {
-        if (GlobalVariable *GVU = dyn_cast<GlobalVariable>(U->user_back())) {
-          if (GVU->getName() == "llvm.compiler.used")
-            return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  void HandleObjC(Function *F) {
-    SmallPtrSet<GlobalVariable *, 8> objcclassgv, objcselgv, selnamegv;
-    bool compilerUsedChanged = false;
-    for (Instruction &I : instructions(F))
-      for (Value *Op : I.operands())
-        if (GlobalVariable *G =
-                dyn_cast<GlobalVariable>(Op->stripPointerCasts())) {
-          if (!G->hasName() || !G->hasInitializer() ||
-              !G->getSection().contains("objc"))
-            continue;
-#if LLVM_VERSION_MAJOR >= 18
-          if (G->getName().starts_with("OBJC_CLASSLIST_REFERENCES"))
-            objcclassgv.insert(G);
-          else if (G->getName().starts_with("OBJC_SELECTOR_REFERENCES"))
-#else
-          if (G->getName().startswith("OBJC_CLASSLIST_REFERENCES"))
-            objcclassgv.insert(G);
-          else if (G->getName().startswith("OBJC_SELECTOR_REFERENCES"))
-#endif
-            objcselgv.insert(G);
-        }
-    Module *M = F->getParent();
-    SmallVector<Instruction *, 8> toErase;
-    for (GlobalVariable *GV : objcclassgv) {
-      // Iterate all CLASSREF uses and replace with objc_getClass() call
-      // Strings are encrypted in other passes
-      std::string className = GV->getInitializer()->getName().str();
-      className.replace(className.find("OBJC_CLASS_$_"),
-                        strlen("OBJC_CLASS_$_"), "");
-      for (User *U : GV->users())
-        if (Instruction *I = dyn_cast<Instruction>(U)) {
-          IRBuilder<> builder(I);
-          Function *objc_getClass_Func =
-              cast<Function>(M->getFunction("objc_getClass"));
-          Value *newClassName =
-              builder.CreateGlobalString(StringRef(className));
-          CallInst *CI = builder.CreateCall(objc_getClass_Func, {newClassName});
-          // We need to bitcast it back to avoid IRVerifier
-          Value *BCI = builder.CreateBitCast(CI, I->getType());
-          I->replaceAllUsesWith(BCI);
-          toErase.emplace_back(I); // We cannot erase it directly or we will
-                                   // have problems releasing the IRBuilder.
-        }
-    }
-    for (GlobalVariable *GV : objcselgv) {
-      // Selector Convert
-      GlobalVariable *selgv = dyn_cast<GlobalVariable>(
-          opaquepointers
-              ? GV->getInitializer()
-              : cast<ConstantExpr>(GV->getInitializer())->getOperand(0));
-      selnamegv.insert(selgv);
-      ConstantDataArray *CDA =
-          dyn_cast<ConstantDataArray>(selgv->getInitializer());
-      StringRef SELName = CDA->getAsString(); // This is REAL Selector Name
-      for (User *U : GV->users())
-        if (Instruction *I = dyn_cast<Instruction>(U)) {
-          IRBuilder<> builder(I);
-          Function *sel_registerName_Func =
-              cast<Function>(M->getFunction("sel_registerName"));
-          Value *newGlobalSELName = builder.CreateGlobalString(SELName);
-          CallInst *CI =
-              builder.CreateCall(sel_registerName_Func, {newGlobalSELName});
-          // We need to bitcast it back to avoid IRVerifier
-          Value *BCI = builder.CreateBitCast(CI, I->getType());
-          I->replaceAllUsesWith(BCI);
-          toErase.emplace_back(I); // We cannot erase it directly or we will
-                                   // have problems releasing the IRBuilder.
-        }
-    }
-    for (Instruction *I : toErase)
-      I->eraseFromParent();
-    for (GlobalVariable *GV : objcclassgv) {
-      GV->removeDeadConstantUsers();
-      if (OnlyUsedByCompilerUsed(GV)) {
-        compilerUsedChanged = true;
-        GV->replaceAllUsesWith(Constant::getNullValue(GV->getType()));
-      }
-      if (GV->getNumUses() == 0) {
-        GV->dropAllReferences();
-        GV->eraseFromParent();
-        continue;
-      }
-    }
-    for (GlobalVariable *GV : objcselgv) {
-      GV->removeDeadConstantUsers();
-      if (OnlyUsedByCompilerUsed(GV)) {
-        compilerUsedChanged = true;
-        GV->replaceAllUsesWith(Constant::getNullValue(GV->getType()));
-      }
-      if (GV->getNumUses() == 0) {
-        GV->dropAllReferences();
-        GV->eraseFromParent();
-      }
-    }
-    for (GlobalVariable *GV : selnamegv) {
-      GV->removeDeadConstantUsers();
-      if (OnlyUsedByCompilerUsed(GV)) {
-        compilerUsedChanged = true;
-        GV->replaceAllUsesWith(Constant::getNullValue(GV->getType()));
-      }
-      if (GV->getNumUses() == 0) {
-        GV->dropAllReferences();
-        GV->eraseFromParent();
-      }
-    }
-    // Fixup llvm.compiler.used, so Verifier won't emit errors
-    if (compilerUsedChanged) {
-      GlobalVariable *CompilerUsedGV =
-          F->getParent()->getGlobalVariable("llvm.compiler.used");
-      if (!CompilerUsedGV)
-        return;
-      ConstantArray *CompilerUsed =
-          dyn_cast<ConstantArray>(CompilerUsedGV->getInitializer());
-      if (!CompilerUsed) {
-        CompilerUsedGV->dropAllReferences();
-        CompilerUsedGV->eraseFromParent();
-        return;
-      }
-      std::vector<Constant *> elements = {};
-      for (unsigned int i = 0; i < CompilerUsed->getNumOperands(); i++) {
-        Constant *Op = CompilerUsed->getAggregateElement(i);
-        if (!Op->isNullValue())
-          elements.emplace_back(Op);
-      }
-      if (elements.size()) {
-        ConstantArray *NewCA = cast<ConstantArray>(
-            ConstantArray::get(CompilerUsed->getType(), elements));
-        CompilerUsedGV->setInitializer(NewCA);
-      } else {
-        CompilerUsedGV->dropAllReferences();
-        CompilerUsedGV->eraseFromParent();
-      }
-    }
-  }
   bool runOnFunction(Function &F) override {
     // Construct Function Prototypes
     if (!toObfuscate(flag, &F, "fco"))
@@ -265,10 +94,8 @@ struct FunctionCallObfuscate : public FunctionPass {
       return false;
     }
     FixFunctionConstantExpr(&F);
-    HandleObjC(&F);
     Type *Int32Ty = Type::getInt32Ty(M->getContext());
     Type *Int8PtrTy = PointerType::get(M->getContext(), 0);
-    // ObjC Runtime Declarations
     FunctionType *dlopen_type = FunctionType::get(
         Int8PtrTy, {Int8PtrTy, Int32Ty},
         false); // int has a length of 32 on both 32/64bit platform

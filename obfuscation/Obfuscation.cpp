@@ -26,9 +26,6 @@ static cl::opt<bool>
                         cl::ZeroOrMore);
 static cl::opt<uint64_t> AesSeed("aesSeed", cl::init(0x1337),
                                  cl::desc("seed for the PRNG"));
-static cl::opt<bool> EnableAntiClassDump("enable-acdobf", cl::init(false),
-                                         cl::NotHidden,
-                                         cl::desc("Enable AntiClassDump."));
 static cl::opt<bool> EnableAntiHooking("enable-antihook", cl::init(false),
                                        cl::NotHidden,
                                        cl::desc("Enable AntiHooking."));
@@ -92,9 +89,6 @@ static void LoadEnv(void) {
   if (getenv("BCFOBF")) {
     EnableBogusControlFlow = true;
   }
-  if (getenv("ACDOBF")) {
-    EnableAntiClassDump = true;
-  }
   if (getenv("CFFOBF")) {
     EnableFlattening = true;
   }
@@ -133,13 +127,6 @@ struct Obfuscation : public ModulePass {
     MP->doInitialization(M);
     MP->runOnModule(M);
     delete MP;
-    // Initial ACD Pass
-    if (EnableAllObfuscation || EnableAntiClassDump) {
-      ModulePass *P = createAntiClassDumpPass();
-      P->doInitialization(M);
-      P->runOnModule(M);
-      delete P;
-    }
     // Now do FCO
     FunctionPass *FP = createFunctionCallObfuscatePass(
         EnableAllObfuscation || EnableFunctionCallObfuscate);
@@ -236,7 +223,6 @@ PreservedAnalyses ObfuscationPass::run(Module &M, ModuleAnalysisManager &MAM) {
 } // namespace llvm
 char Obfuscation::ID = 0;
 INITIALIZE_PASS_BEGIN(Obfuscation, "obfus", "Enable Obfuscation", false, false)
-INITIALIZE_PASS_DEPENDENCY(AntiClassDump);
 INITIALIZE_PASS_DEPENDENCY(BogusControlFlow);
 INITIALIZE_PASS_DEPENDENCY(Flattening);
 INITIALIZE_PASS_DEPENDENCY(FunctionCallObfuscate);
@@ -260,9 +246,7 @@ PassPluginLibraryInfo getHikariPluginInfo() {
               if (Name == EnableIRObfusaction.ArgStr) {
                 EnableIRObfusaction = true;
                 for (const auto &Element : InnerPipeline) {
-                  if (Element.Name == EnableAntiClassDump.ArgStr) {
-                    EnableAntiClassDump = true;
-                  } else if (Element.Name == EnableAntiHooking.ArgStr) {
+                  if (Element.Name == EnableAntiHooking.ArgStr) {
                     EnableAntiHooking = true;
                   } else if (Element.Name == EnableAntiDebugging.ArgStr) {
                     EnableAntiDebugging = true;

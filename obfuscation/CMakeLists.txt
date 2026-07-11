@@ -8,7 +8,6 @@ add_library(Hikari SHARED
         LegacyLowerSwitch.cpp
         Utils.cpp
         SplitBasicBlocks.cpp
-        AntiClassDump.cpp
         AntiDebugging.cpp
         AntiHooking.cpp
         StringEncryption.cpp
