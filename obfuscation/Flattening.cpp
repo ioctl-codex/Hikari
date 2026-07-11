@@ -2,12 +2,11 @@
 // [License](https://github.com/HikariObfuscator/Hikari/wiki/License).
 //===----------------------------------------------------------------------===//
 #include "include/Flattening.h"
+#include "include/LegacyLowerSwitch.h"
 #include "include/CryptoUtils.h"
 #include "include/Utils.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Transforms/Utils/LowerSwitch.h"
 
 using namespace llvm;
 
@@ -28,6 +27,7 @@ FunctionPass *llvm::createFlatteningPass(bool flag) {
 }
 INITIALIZE_PASS(Flattening, "cffobf", "Enable Control Flow Flattening.", false,
                 false)
+
 bool Flattening::runOnFunction(Function &F) {
   Function *tmp = &F;
   // Do we obfuscate
@@ -51,12 +51,11 @@ void Flattening::flatten(Function *f) {
   std::unordered_map<uint32_t, uint32_t> scrambling_key;
   // END OF SCRAMBLER
 
-  PassBuilder PB;
-  FunctionAnalysisManager FAM;
-  FunctionPassManager FPM;
-  PB.registerFunctionAnalyses(FAM);
-  FPM.addPass(LowerSwitchPass());
-  FPM.run(*f, FAM);
+  // Use a self-contained legacy LowerSwitch implementation so we do not
+  // depend on AnalysisManager keys from the host process (rustc/opt).
+  FunctionPass *lower = createLegacyLowerSwitchPass();
+  lower->runOnFunction(*f);
+  delete lower;
 
   for (BasicBlock &BB : *f) {
     if (BB.isEHPad() || BB.isLandingPad()) {
@@ -105,10 +104,12 @@ void Flattening::flatten(Function *f) {
 
   // Create switch variable and set as it
   switchVar = new AllocaInst(Type::getInt32Ty(f->getContext()),
-                             DL.getAllocaAddrSpace(), "switchVar", oldTerm);
+                             DL.getAllocaAddrSpace(), "switchVar",
+                             BasicBlock::iterator(oldTerm));
   switchVarAddr =
-      new AllocaInst(Type::getInt32Ty(f->getContext())->getPointerTo(),
-                     DL.getAllocaAddrSpace(), "", oldTerm);
+      new AllocaInst(PointerType::get(f->getContext(), 0),
+                     DL.getAllocaAddrSpace(), "",
+                     BasicBlock::iterator(oldTerm));
 
   // Remove jump
   oldTerm->eraseFromParent();

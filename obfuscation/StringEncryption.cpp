@@ -441,7 +441,7 @@ struct StringEncryption : public ModulePass {
               if (GlobalVariable *GV2 =
                       dyn_cast<GlobalVariable>(CE->getOperand(0))) {
                 if (GV->getNumUses() <= 1 &&
-                    GV2->getGlobalIdentifier() == GV->getGlobalIdentifier())
+                    GV2 == GV)
                   PtrauthGV->getInitializer()->setOperand(
                       2, ConstantExpr::getPtrToInt(
                              M->getGlobalVariable(
@@ -451,7 +451,7 @@ struct StringEncryption : public ModulePass {
             } else if (GlobalVariable *GV2 = dyn_cast<GlobalVariable>(
                            PtrauthGV->getInitializer()->getOperand(2)))
               if (GV->getNumUses() <= 1 &&
-                  GV2->getGlobalIdentifier() == GV->getGlobalIdentifier())
+                  GV2 == GV)
                 PtrauthGV->getInitializer()->setOperand(
                     2, ConstantExpr::getPtrToInt(
                            M->getGlobalVariable(
@@ -509,7 +509,8 @@ struct StringEncryption : public ModulePass {
     ReplaceInstWithInst(A->getTerminator(), newBr);
     // Insert DecryptionCode
     HandleDecryptionBlock(B, C, GV2Keys);
-    IRBuilder<> IRB(A->getFirstNonPHIOrDbgOrLifetime());
+    Instruction *InsertPt = &*A->getFirstNonPHIOrDbgOrLifetime();
+    IRBuilder<> IRB(InsertPt);
     // Add atomic load checking status in A
     LoadInst *LI = IRB.CreateLoad(StatusGV->getValueType(), StatusGV,
                                   "LoadEncryptionStatus");
@@ -575,7 +576,7 @@ struct StringEncryption : public ModulePass {
             0,
             ConstantExpr::getBitCast(
                 NewPtrauthGV,
-                Type::getInt32Ty(NewPtrauthGV->getContext())->getPointerTo()));
+                PointerType::get(NewPtrauthGV->getContext(), 0)));
       }
     }
     return ObjcGV;

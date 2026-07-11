@@ -109,7 +109,7 @@ bool readFlag(Function *f, std::string attribute) {
           II->eraseFromParent();
           parent->eraseFromParent();
         } else {
-          BranchInst::Create(normalDest, II);
+          BranchInst::Create(normalDest, BasicBlock::iterator(II));
           II->eraseFromParent();
         }
         if (pred_size(unwindDest) == 0)
@@ -208,7 +208,7 @@ bool readFlagUint32OptVal(Function *f, std::string opt, uint32_t *val) {
             II->eraseFromParent();
             parent->eraseFromParent();
           } else {
-            BranchInst::Create(normalDest, II);
+            BranchInst::Create(normalDest, BasicBlock::iterator(II));
             II->eraseFromParent();
           }
           if (pred_size(unwindDest) == 0)

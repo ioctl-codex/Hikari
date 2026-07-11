@@ -73,11 +73,11 @@ struct FunctionCallObfuscate : public FunctionPass {
     }
     this->triple = Triple(M.getTargetTriple());
     if (triple.getVendor() == Triple::VendorType::Apple) {
-      Type *Int8PtrTy = Type::getInt8Ty(M.getContext())->getPointerTo();
+      Type *Int8PtrTy = PointerType::get(M.getContext(), 0);
       // Generic ObjC Runtime Declarations
       FunctionType *IMPType =
           FunctionType::get(Int8PtrTy, {Int8PtrTy, Int8PtrTy}, true);
-      PointerType *IMPPointerType = PointerType::get(IMPType, 0);
+      PointerType *IMPPointerType = PointerType::get(IMPType->getContext(), 0);
       FunctionType *class_replaceMethod_type = FunctionType::get(
           IMPPointerType, {Int8PtrTy, Int8PtrTy, IMPPointerType, Int8PtrTy},
           false);
@@ -153,7 +153,7 @@ struct FunctionCallObfuscate : public FunctionPass {
           Function *objc_getClass_Func =
               cast<Function>(M->getFunction("objc_getClass"));
           Value *newClassName =
-              builder.CreateGlobalStringPtr(StringRef(className));
+              builder.CreateGlobalString(StringRef(className));
           CallInst *CI = builder.CreateCall(objc_getClass_Func, {newClassName});
           // We need to bitcast it back to avoid IRVerifier
           Value *BCI = builder.CreateBitCast(CI, I->getType());
@@ -177,7 +177,7 @@ struct FunctionCallObfuscate : public FunctionPass {
           IRBuilder<> builder(I);
           Function *sel_registerName_Func =
               cast<Function>(M->getFunction("sel_registerName"));
-          Value *newGlobalSELName = builder.CreateGlobalStringPtr(SELName);
+          Value *newGlobalSELName = builder.CreateGlobalString(SELName);
           CallInst *CI =
               builder.CreateCall(sel_registerName_Func, {newGlobalSELName});
           // We need to bitcast it back to avoid IRVerifier
@@ -261,13 +261,13 @@ struct FunctionCallObfuscate : public FunctionPass {
     if (!this->initialized)
       initialize(*M);
     if (!triple.isAndroid() && !triple.isOSDarwin()) {
-      errs() << "Unsupported Target Triple: " << M->getTargetTriple() << "\n";
+      errs() << "Unsupported Target Triple: " << M->getTargetTriple().str() << "\n";
       return false;
     }
     FixFunctionConstantExpr(&F);
     HandleObjC(&F);
     Type *Int32Ty = Type::getInt32Ty(M->getContext());
-    Type *Int8PtrTy = Type::getInt8Ty(M->getContext())->getPointerTo();
+    Type *Int8PtrTy = PointerType::get(M->getContext(), 0);
     // ObjC Runtime Declarations
     FunctionType *dlopen_type = FunctionType::get(
         Int8PtrTy, {Int8PtrTy, Int32Ty},
@@ -330,7 +330,7 @@ struct FunctionCallObfuscate : public FunctionPass {
                 dlopen_flag = ANDROID32_FLAG;
             } else {
               errs() << "[FunctionCallObfuscate] Unsupported Target Triple:"
-                     << M->getTargetTriple() << "\n";
+                     << M->getTargetTriple().str() << "\n";
               errs() << "[FunctionCallObfuscate] Applying Default Signature:"
                      << dlopen_flag << "\n";
             }
@@ -341,7 +341,7 @@ struct FunctionCallObfuscate : public FunctionPass {
             // Create dlsym call
             Value *fp = IRB.CreateCall(
                 dlsym_decl,
-                {Handle, IRB.CreateGlobalStringPtr(calledFunctionName)});
+                {Handle, IRB.CreateGlobalString(calledFunctionName)});
             Value *bitCastedFunction =
                 IRB.CreateBitCast(fp, CS.getCalledValue()->getType());
             CS.setCalledFunction(bitCastedFunction);

@@ -10,12 +10,11 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
-#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/LowerSwitch.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include "include/LegacyLowerSwitch.h"
 #include <unordered_set>
 
 using namespace llvm;
@@ -49,11 +48,9 @@ struct IndirectBranch : public FunctionPass {
   }
   StringRef getPassName() const override { return "IndirectBranch"; }
   bool initialize(Module &M) {
-    PassBuilder PB;
-    FunctionAnalysisManager FAM;
-    FunctionPassManager FPM;
-    PB.registerFunctionAnalyses(FAM);
-    FPM.addPass(LowerSwitchPass());
+    // Use the self-contained legacy LowerSwitch so AnalysisManager keys do not
+    // need to match the host process (rustc/opt).
+    FunctionPass *Lower = createLegacyLowerSwitchPass();
 
     SmallVector<Constant *, 32> BBs;
     unsigned long long i = 0;
@@ -66,7 +63,7 @@ struct IndirectBranch : public FunctionPass {
         UseStackTemp = UseStack;
 
       // See https://github.com/61bcdefg/Hikari-LLVM15/issues/32
-      FPM.run(F, FAM);
+      Lower->runOnFunction(F);
 
       if (!toObfuscateBoolOption(&F, "indibran_enc_jump_target",
                                  &EncryptJumpTargetTemp))
@@ -85,14 +82,14 @@ struct IndirectBranch : public FunctionPass {
                         Type::getInt8Ty(M.getContext()),
                         ConstantExpr::getBitCast(
                             BlockAddress::get(&BB),
-                            Type::getInt8Ty(M.getContext())->getPointerTo()),
+                            PointerType::get(M.getContext(), 0)),
                         encmap[&F])
                   : BlockAddress::get(&BB));
         }
     }
     if (to_obf_funcs.size()) {
       ArrayType *AT = ArrayType::get(
-          Type::getInt8Ty(M.getContext())->getPointerTo(), BBs.size());
+          PointerType::get(M.getContext(), 0), BBs.size());
       Constant *BlockAddressArray =
           ConstantArray::get(AT, ArrayRef<Constant *>(BBs));
       GlobalVariable *Table = new GlobalVariable(
@@ -100,6 +97,7 @@ struct IndirectBranch : public FunctionPass {
           BlockAddressArray, "IndirectBranchingGlobalTable");
       appendToCompilerUsed(M, {Table});
     }
+    delete Lower;
     this->initialized = true;
     return true;
   }
@@ -118,7 +116,7 @@ struct IndirectBranch : public FunctionPass {
 
     Type *Int8Ty = Type::getInt8Ty(M->getContext());
     Type *Int32Ty = Type::getInt32Ty(M->getContext());
-    Type *Int8PtrTy = Type::getInt8Ty(M->getContext())->getPointerTo();
+    Type *Int8PtrTy = PointerType::get(M->getContext(), 0);
 
     Value *zero = ConstantInt::get(Int32Ty, 0);
 

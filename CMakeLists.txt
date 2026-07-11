@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(ollvm-pass)
 
-set(LT_LLVM_INSTALL_DIR  "" CACHE PATH "/opt/homebrew/opt/llvm@19")
+set(LT_LLVM_INSTALL_DIR  "" CACHE PATH "/opt/homebrew/opt/llvm")
 
 
 # Add the location of LLVMConfig.cmake to CMake search paths (so that
@@ -9,8 +9,8 @@ set(LT_LLVM_INSTALL_DIR  "" CACHE PATH "/opt/homebrew/opt/llvm@19")
 list(APPEND CMAKE_PREFIX_PATH "${LT_LLVM_INSTALL_DIR}/lib/cmake/llvm/")
 
 find_package(LLVM REQUIRED CONFIG)
-if("${LLVM_VERSION_MAJOR}" VERSION_LESS 18)
-  message(FATAL_ERROR "Found LLVM ${LLVM_VERSION_MAJOR}, but need LLVM 18 or above")
+if("${LLVM_VERSION_MAJOR}" VERSION_LESS 22)
+  message(FATAL_ERROR "Found LLVM ${LLVM_VERSION_MAJOR}, but need LLVM 22 or above (rustc current)")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")

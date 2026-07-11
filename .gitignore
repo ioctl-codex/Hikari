@@ -1,4 +1,7 @@
 build
+build-llvm20
+build-llvm22
+samples/out
 .vscode
 CMakeFiles
 compile_commands.json

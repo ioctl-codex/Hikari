@@ -118,29 +118,26 @@ struct AntiHook : public ModulePass {
 
     if (triple.getVendor() == Triple::VendorType::Apple &&
         StructType::getTypeByName(M.getContext(), "struct._objc_method")) {
-      Type *Int8PtrTy = Type::getInt8Ty(M.getContext())->getPointerTo();
+      Type *Int8PtrTy = PointerType::get(M.getContext(), 0);
       M.getOrInsertFunction("objc_getClass",
                             FunctionType::get(Int8PtrTy, {Int8PtrTy}, false));
       M.getOrInsertFunction("sel_registerName",
                             FunctionType::get(Int8PtrTy, {Int8PtrTy}, false));
       FunctionType *IMPType =
           FunctionType::get(Int8PtrTy, {Int8PtrTy, Int8PtrTy}, true);
-      PointerType *IMPPointerType = PointerType::getUnqual(IMPType);
+      PointerType *IMPPointerType = PointerType::get(IMPType->getContext(), 0);
       M.getOrInsertFunction(
           "method_getImplementation",
           FunctionType::get(IMPPointerType,
-                            {PointerType::getUnqual(StructType::getTypeByName(
-                                M.getContext(), "struct._objc_method"))},
+                            {PointerType::get(M.getContext(), 0)},
                             false));
       M.getOrInsertFunction(
           "class_getInstanceMethod",
-          FunctionType::get(PointerType::getUnqual(StructType::getTypeByName(
-                                M.getContext(), "struct._objc_method")),
+          FunctionType::get(PointerType::get(M.getContext(), 0),
                             {Int8PtrTy, Int8PtrTy}, false));
       M.getOrInsertFunction(
           "class_getClassMethod",
-          FunctionType::get(PointerType::getUnqual(StructType::getTypeByName(
-                                M.getContext(), "struct._objc_method")),
+          FunctionType::get(PointerType::get(M.getContext(), 0),
                             {Int8PtrTy, Int8PtrTy}, false));
     }
     return true;
@@ -275,7 +272,7 @@ struct AntiHook : public ModulePass {
 
     Type *Int64Ty = Type::getInt64Ty(F->getContext());
     Type *Int32Ty = Type::getInt32Ty(F->getContext());
-    Type *Int32PtrTy = Type::getInt32Ty(F->getContext())->getPointerTo();
+    Type *Int32PtrTy = PointerType::get(F->getContext(), 0);
 
     Value *Load =
         IRBDetect.CreateLoad(Int32Ty, IRBDetect.CreateBitCast(F, Int32PtrTy));
@@ -328,12 +325,12 @@ struct AntiHook : public ModulePass {
     IRBuilder<> IRBA(A);
     IRBuilder<> IRBB(B);
 
-    Type *Int8PtrTy = Type::getInt8Ty(M->getContext())->getPointerTo();
+    Type *Int8PtrTy = PointerType::get(M->getContext(), 0);
 
     Value *GetClass = IRBA.CreateCall(M->getFunction("objc_getClass"),
-                                      {IRBA.CreateGlobalStringPtr(classname)});
+                                      {IRBA.CreateGlobalString(classname)});
     Value *GetSelector = IRBA.CreateCall(M->getFunction("sel_registerName"),
-                                         {IRBA.CreateGlobalStringPtr(selname)});
+                                         {IRBA.CreateGlobalString(selname)});
     Value *GetMethod =
         IRBA.CreateCall(M->getFunction(classmethod ? "class_getClassMethod"
                                                    : "class_getInstanceMethod"),

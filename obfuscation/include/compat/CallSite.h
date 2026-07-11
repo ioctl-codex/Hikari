@@ -591,7 +591,8 @@ public:
 
   /// Determine whether this data operand is not captured.
   bool doesNotCapture(unsigned OpNo) const {
-    return dataOperandHasImpliedAttr(OpNo + 1, Attribute::NoCapture);
+    // Attribute::NoCapture was removed in LLVM 22 in favor of CaptureInfo.
+    return cast<CallBase>(getInstruction())->doesNotCapture(OpNo);
   }
 
   /// Determine whether this argument is passed by value.

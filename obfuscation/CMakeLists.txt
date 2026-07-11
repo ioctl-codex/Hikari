@@ -5,6 +5,7 @@ add_library(Hikari SHARED
         SubstituteImpl.cpp
         Substitution.cpp
         Flattening.cpp
+        LegacyLowerSwitch.cpp
         Utils.cpp
         SplitBasicBlocks.cpp
         AntiClassDump.cpp

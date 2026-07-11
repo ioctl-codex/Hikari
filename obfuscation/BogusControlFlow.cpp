@@ -319,8 +319,8 @@ struct BogusControlFlow : public FunctionPass {
     // part, because they actually are updated in the second part according to
     // them.
     BasicBlock::iterator i1 = basicBlock->begin();
-    if (basicBlock->getFirstNonPHIOrDbgOrLifetime())
-      i1 = (BasicBlock::iterator)basicBlock->getFirstNonPHIOrDbgOrLifetime();
+    if (basicBlock->getFirstNonPHIOrDbgOrLifetime() != basicBlock->end())
+      i1 = basicBlock->getFirstNonPHIOrDbgOrLifetime();
 
     // https://github.com/eshard/obfuscator-llvm/commit/85c8719c86bcb4784f5a436e28f3496e91cd6292
     /* TODO: find a real fix or try with the probe-stack inline-asm when its
