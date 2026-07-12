@@ -14,7 +14,8 @@
 
 ```bash
 # 在仓库根目录
-./samples/run_demo.sh
+./samples/run_demo.sh      # 经典混淆对比
+./samples/run_vmp.sh       # IR VMP 正确性验收
 
 # 自定义插件路径 / LLVM / pass
 PLUGIN=/path/to/libHikari.dylib \
@@ -30,9 +31,17 @@ PASSES='hikari(enable-strcry,enable-bcfobf)' \
 | 样本 | 路径 | 内容 |
 |------|------|------|
 | C | `c/hello.c` | 明文密码串 + `switch` 分类 |
+| C VMP | `c/vmp_add.c` | 标注 `vmp`：算术/分支/GEP/call/全局/递归/多次调用 |
 | Rust | `rust/` | `fib` + license key 校验 |
 
-## 默认 pass
+## VMP 验收（`run_vmp.sh`）
+
+- 默认 `PASSES=hikari()`：只虚拟化 `annotate("vmp")` 的函数
+- 断言 clean 与 VMP **stdout 完全一致**
+- 检查 `@vmp_code_*` / `@vmp_seeds_*` / `encrypt=1` / `vmp_fact` 递归样例
+- 环境变量（可选）：`VMPNOENC=1` 关加密；`VMPHARDEN=1` 对解释器 CFF
+
+## 默认 pass（`run_demo.sh`）
 
 ```
 hikari(enable-bcfobf,enable-cffobf,enable-subobf,enable-splitobf,enable-strcry,enable-indibran)

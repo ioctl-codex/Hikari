@@ -13,6 +13,7 @@
 #include "include/Split.h"
 #include "include/StringEncryption.h"
 #include "include/Substitution.h"
+#include "include/Virtualization.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"

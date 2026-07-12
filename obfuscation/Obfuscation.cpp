@@ -62,6 +62,9 @@ static cl::opt<bool>
 static cl::opt<bool>
     EnableFunctionWrapper("enable-funcwra", cl::init(false), cl::NotHidden,
                           cl::desc("Enable Function Wrapper."));
+static cl::opt<bool>
+    EnableVirtualization("enable-vmp", cl::init(false), cl::NotHidden,
+                         cl::desc("Enable IR Virtualization (VMP)."));
 // End Obfuscator Options
 
 static void LoadEnv(void) {
@@ -100,6 +103,9 @@ static void LoadEnv(void) {
   }
   if (getenv("ADB")) {
     EnableAntiDebugging = true;
+  }
+  if (getenv("VMP")) {
+    EnableVirtualization = true;
   }
 }
 namespace llvm {
@@ -154,10 +160,29 @@ struct Obfuscation : public ModulePass {
                                        EnableBogusControlFlow);
         P->runOnFunction(F);
         delete P;
-        P = createFlatteningPass(EnableAllObfuscation || EnableFlattening);
+        // CFF: skip functions that will be virtualized — post-VMP CFF is applied
+        // inside Virtualization when enable-cffobf/VMPHARDEN is on. Pre-CFF+VMP
+        // would flatten then virtualize a huge state machine (very bulky).
+        {
+          bool doCff = EnableAllObfuscation || EnableFlattening;
+          bool willVmp = toObfuscate(EnableVirtualization, &F, "vmp");
+          if (doCff && willVmp) {
+            errs() << "Skip pre-CFF for VMP target (post-flatten after VMP): "
+                   << F.getName() << "\n";
+          } else if (doCff) {
+            P = createFlatteningPass(true);
+            P->runOnFunction(F);
+            delete P;
+          }
+        }
+        P = createSubstitutionPass(EnableAllObfuscation || EnableSubstitution);
         P->runOnFunction(F);
         delete P;
-        P = createSubstitutionPass(EnableAllObfuscation || EnableSubstitution);
+        // VMP after classic function-level obfuscations; not part of allobf.
+        // postFlatten when CFF is enabled → VMP + CFF hybrid.
+        P = createVirtualizationPass(
+            EnableVirtualization,
+            /*postFlatten=*/EnableAllObfuscation || EnableFlattening);
         P->runOnFunction(F);
         delete P;
       }
@@ -271,6 +296,8 @@ PassPluginLibraryInfo getHikariPluginInfo() {
                     EnableIndirectBranching = true;
                   } else if (Element.Name == EnableFunctionWrapper.ArgStr) {
                     EnableFunctionWrapper = true;
+                  } else if (Element.Name == EnableVirtualization.ArgStr) {
+                    EnableVirtualization = true;
                   }
                 }
 

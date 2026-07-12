@@ -1,0 +1,411 @@
+# Hikari IR-VMP 使用与设计文档
+
+> 基于 LLVM IR 的函数级虚拟机保护（Virtual Machine Protection）。  
+> 实现：`obfuscation/Virtualization.cpp`、`obfuscation/vmp/Opcode.h`  
+> 调度：`obfuscation/Obfuscation.cpp`（在函数级混淆之后）
+
+---
+
+## 1. 它做什么
+
+将选定函数的 **LLVM IR** 翻译成自定义 **bytecode**，原函数体改写为：
+
+1. 在栈上分配 VM 数据区 / IP / 解密状态  
+2. 装入参数与全局指针  
+3. 进入 **fetch → decrypt → dispatch → handler** 解释循环  
+4. 从数据区读返回值并 `ret`
+
+静态逆向时，业务上的 `add` / `icmp` / `br` / 循环等不再以明文 IR/机器码形态出现，而变成密文字节码 + 通用解释器。
+
+**不是** Android SO 壳、不是自定义 Linker、不是商业 VMProtect 的 x86 字节码级产品；它是 **编译期 IR Pass**，适合 C/C++/Rust 等能产出 LLVM IR 的路径。
+
+---
+
+## 2. 快速开始
+
+### 2.1 构建插件
+
+```bash
+cmake -G Ninja -S . -B ./build-llvm22 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLT_LLVM_INSTALL_DIR=/opt/homebrew/opt/llvm
+cmake --build ./build-llvm22
+# 产物：build-llvm22/obfuscation/libHikari.dylib  (或 .so)
+```
+
+### 2.2 标注需要保护的函数
+
+```c
+__attribute__((annotate("vmp")))
+int secret_check(int uid, int token) {
+  // 建议 -O0 / optnone，GEP/控制流更规整
+  ...
+}
+
+// 排除（全局 enable-vmp 时）
+__attribute__((annotate("novmp")))
+int do_not_virtualize(void);
+```
+
+### 2.3 跑 Pass
+
+```bash
+export PATH=/opt/homebrew/opt/llvm/bin:$PATH
+PLUGIN=build-llvm22/obfuscation/libHikari.dylib
+
+clang -O0 -emit-llvm -c secret.c -o secret.bc
+
+# 只处理 annotate("vmp") 的函数
+opt -load-pass-plugin="$PLUGIN" --passes='hikari()' \
+  secret.bc -o secret_vmp.bc
+
+# 尝试模块内所有可译函数
+opt -load-pass-plugin="$PLUGIN" --passes='hikari(enable-vmp)' \
+  secret.bc -o secret_vmp.bc
+
+# 推荐：VMP + 后置控制流平坦化（打散解释器）
+opt -load-pass-plugin="$PLUGIN" --passes='hikari(enable-cffobf)' \
+  secret.bc -o secret_vmp_cff.bc
+
+llc -filetype=obj secret_vmp.bc -o secret.o
+clang secret.o -o secret
+```
+
+### 2.4 验收脚本
+
+```bash
+./samples/run_vmp.sh          # 基础正确性（算术/分支/GEP/call/全局/递归）
+# 复杂样例源码：samples/c/vmp_complex.c
+# 复杂样例对比产物：samples/out/vc_vmp、samples/out/vc_vmp_cff
+```
+
+---
+
+## 3. 开关与标注
+
+### 3.1 管线 / 环境变量
+
+| 机制 | 作用 |
+|------|------|
+| `hikari()` | 启用调度；**仅**虚拟化带 `vmp` 标注的函数 |
+| `hikari(enable-vmp)` | 尝试虚拟化模块内所有可译函数 |
+| 环境变量 `VMP=1` | 等同 `enable-vmp` |
+| **不在** `enable-allobf` 内 | 需显式打开或靠标注 |
+
+### 3.2 加密
+
+| 机制 | 作用 |
+|------|------|
+| 默认 | **开启** L1 双 seed 加密 |
+| `VMPNOENC=1` | 关闭加密（联调） |
+| `VMPENCRYPT=1` | 强制开启 |
+| 标注 `novmpenc` | 该函数关闭加密 |
+| 标注 `vmpenc` | 该函数强制加密 |
+
+### 3.3 与平坦化（CFF）结合
+
+| 机制 | 作用 |
+|------|------|
+| `hikari(enable-cffobf)` + `annotate("vmp")` | **先 VMP，再 CFF**（推荐混合） |
+| 调度行为 | VMP 目标 **跳过前置 CFF**，避免「先平坦化再整段虚拟化」体积爆炸 |
+| `VMPHARDEN=1` / 标注 `vmpharden` | 无 `enable-cffobf` 时也可对 VMP 后函数做后置 CFF |
+| 后置 CFF 范围 | `fn` 本体 + `vmp_eval_*` / `vmp_read_var_*` / `vmp_ch_*` / `vmp_seed_*` |
+
+### 3.4 其它标注
+
+| 标注 | 含义 |
+|------|------|
+| `vmp` | 启用虚拟化 |
+| `novmp` | 禁止虚拟化 |
+| `vmpharden` | 虚拟化后对该函数做 CFF |
+| `vmpenc` / `novmpenc` | 强制 / 关闭该函数字节码加密 |
+
+---
+
+## 4. 架构
+
+### 4.1 编译期三步
+
+```
+选中函数 F
+    │
+    ▼
+┌─────────────┐
+│ Translator  │  IR → bytecode（value_map / BB map / call sites）
+│             │  可选 L1 双 seed 加密
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│ Interpreter │  IRBuilder 生成：
+│   Builder   │  vmp_loop / handlers / vmp_eval / vmp_ch / vmp_seed
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  Modifier   │  deleteBody → 启动器（装参、调循环、取返回值）
+│  (合入同一  │  可选 post-CFF
+│   函数体)   │
+└─────────────┘
+```
+
+### 4.2 运行时布局（每调用独立，可重入）
+
+全部在 **栈上**（非全局单例 data 段）：
+
+| 对象 | 含义 |
+|------|------|
+| `vmp_data[N]` | 虚拟寄存器 / 参数 / alloca 区 / 返回值槽 |
+| `ip` | 字节码偏移（`i32`） |
+| `run` | 是否继续解释 |
+| `op_state` / `code_state` | L1 解密 PRNG 状态 |
+| `@vmp_code_<F>` | 只读密文（或明文）bytecode |
+| `@vmp_seeds_<F>` | 每 BB：`{entry_ip, opcode_seed, code_seed}` |
+
+**返回值**默认写在 `vmp_data` 偏移 0。  
+**参数**按顺序排在返回值槽之后。  
+**`alloca` 结果**存的是 **真实虚地址** `data_base + area_off`，因此可以把指针传给外部 `memcpy` 类函数。
+
+### 4.3 符号命名（每个被 VMP 的函数）
+
+| 符号 | 角色 |
+|------|------|
+| `@vmp_code_<fn>` | 字节码 |
+| `@vmp_seeds_<fn>` | BB seed 表 |
+| `@vmp_seed_<fn>` | 按 IP 重载双 seed |
+| `@vmp_eval_<fn>` | 解 `PackedValue` 并求值 |
+| `@vmp_read_var_<fn>` | 读变量操作数（offset） |
+| `@vmp_ch_<fn>` | 出站 call 分发（`call_handler`） |
+| 辅助函数带 `novmp` | 避免被二次 VMP |
+
+### 4.4 主循环（逻辑）
+
+```
+seed_reload(entry_ip)
+while running:
+  op = fetch_op()          # code 层 XOR + opcode 层 XOR
+  switch op:
+    ALLOCA / LOAD / STORE / BINOP / ICMP / BR / RET /
+    GEP / CALL / CAST / SELECT / UNREACHABLE
+    default → trap (停机)
+BR 修改 ip 后 seed_reload(new_ip)
+RET 写返回值槽，running = 0
+```
+
+---
+
+## 5. 字节码与操作数
+
+### 5.1 Opcode（`vmp/Opcode.h`）
+
+| 值 | 助记符 | 语义 |
+|----|--------|------|
+| `0x01` | `OP_ALLOCA` | 栈槽 + 写入真实指针 |
+| `0x02` | `OP_LOAD` | 按 VA load |
+| `0x03` | `OP_STORE` | 按 VA store |
+| `0x04` | `OP_BINOP` | 整数二元运算（子操作码） |
+| `0x05` | `OP_ICMP` | 整数比较 |
+| `0x06` | `OP_BR` | 无条件 / 有条件跳转 |
+| `0x07` | `OP_RET` | 返回 |
+| `0x08` | `OP_GEP` | 指针运算 |
+| `0x09` | `OP_CALL` | 出站调用（仅 `func_id`） |
+| `0x0A` | `OP_CAST` | trunc/zext/sext/… |
+| `0x0B` | `OP_SELECT` | 选择 |
+| `0x0E` | `OP_UNREACHABLE` | 停机 |
+
+### 5.2 PackedValue
+
+```
+size:u8 | type_id:u8 | payload
+  type_id == 0 → 变量：payload = u64 data_off
+  type_id != 0 → 常量：payload = LE 立即数，长度 = size
+```
+
+### 5.3 常见指令布局（摘要）
+
+```
+ALLOCA:  op | res_PV(var) | area_off:u64
+LOAD:    op | res_PV(var) | ptr_PV
+STORE:   op | val_PV      | ptr_PV
+BINOP:   op | subop:u8 | res_PV | lhs_PV | rhs_PV
+ICMP:    op | pred:u8  | res_PV | lhs_PV | rhs_PV
+BR 无条: op | 0 | target:u64
+BR 有条: op | 1 | cond_PV | target_t:u64 | target_f:u64
+RET:     op | has:u8 [| val_PV]
+GEP:     op | kind:u8 | elem_size:u64 | res_PV | base_PV | index_PV
+CALL:    op | func_id:u64          # 参数在 vmp_ch_* 内从 data 取
+```
+
+`BR` 目标在 **加密前** 回填为 BB 入口 code 偏移。
+
+### 5.4 L1 双 seed 加密
+
+对每个 basic block：
+
+1. 记录 `opcode_seed`、`code_seed`  
+2. 明文 emit（含 BR patch）  
+3. **仅对 opcode 字节** 做 xorshift32 流 XOR（opcode 层）  
+4. **对 BB 全区间** 再做 xorshift32 流 XOR（code 层）  
+
+运行时：`get_byte` 解 code 层；`fetch_op` 再解 opcode 层。  
+跨 BB：`BR` 后 `vmp_seed_*` 按 `entry_ip` 查表重载两种 seed。
+
+---
+
+## 6. 支持的 IR 与限制
+
+### 6.1 支持（-O0 友好）
+
+- `alloca`（非 VLA）、`load` / `store`（非 atomic/volatile）  
+- 整数 `i1/i8/i16/i32/i64` 的 binop / icmp / cast / select  
+- `br` / `ret` / `unreachable`  
+- `gep`：常量累积偏移、单索引、常见 `0, i` 数组形态  
+- `call`：直接 / 间接（经 `vmp_ch_*`）；debug/lifetime 等 intrinsic 丢弃  
+- 全局变量 / 函数指针：启动器 `ptrtoint` 写入 data  
+
+译码前会 `fixStack`（消 PHI）并 materialize `ConstantExpr`。
+
+### 6.2 不支持（整函数 skip，不损坏 Module）
+
+日志形如：`[VMP] skip foo (...)` 或 `[VMP] translate fail foo: ...`
+
+- 变参  
+- 异常 / EH（`invoke`、landingpad 等）  
+- 浮点、向量  
+- 复杂多动态索引 GEP  
+- 构建解释器失败时会尝试从 backup 恢复函数体  
+
+### 6.3 建议
+
+- 保护 **关键路径**（授权、校验、协议），不要无脑全模块 `enable-vmp`  
+- 目标函数 `-O0` 或 `optnone` + `noinline`  
+- 需要可读联调时用 `VMPNOENC=1`  
+
+---
+
+## 7. 与其它 Hikari Pass 的顺序
+
+```
+AntiHook → FCO → AntiDebug → StringEnc
+  → Split → BCF
+  → CFF（跳过即将 VMP 的函数）
+  → SUB
+  → ★ VMP（+ 可选 post-CFF）★
+  → ConstEnc → IndiBr → FuncWrapper
+```
+
+| 组合 | 建议 |
+|------|------|
+| 仅 VMP | `hikari()` + `annotate("vmp")` |
+| VMP + 打散解释器 | `hikari(enable-cffobf)` + `annotate("vmp")` |
+| 字符串加密 + VMP | `hikari(enable-strcry)` + 标注；注意字符串在 VMP 外更合适 |
+| 全模块 VMP | `enable-vmp`（体积/性能代价大） |
+
+---
+
+## 8. 前后对比（直观）
+
+**VMP 前**（业务 IR 可见）：
+
+```llvm
+%12 = xor i32 %uid, %nonce
+%15 = icmp slt i32 %i, 8
+%24 = call i32 @mix(...)
+br i1 %cond, label %then, label %else
+```
+
+**VMP 后**（启动器 + 循环 + 密文）：
+
+```llvm
+@vmp_code_license_score = constant [3014 x i8] c"\xx\yy..."  ; 密文
+@vmp_seeds_license_score = constant [28 x {i32,i32,i32}] ...
+
+define i32 @license_score(...) {
+vmp_entry:
+  %vmp_data = alloca [516 x i8]
+  ; store args → data
+  call void @vmp_seed_license_score(i32 0, ...)
+  br label %vmp_loop
+vmp_loop:
+  ; fetch + xorshift decrypt + switch handlers
+}
+```
+
+复杂样例：`samples/c/vmp_complex.c`  
+实测（约）：`license_score` IR 从 ~190 行 → ~2500 行；bytecode ~3KB；text 段从 ~1KB 级涨到十余 KB；再加 CFF 会继续增大。
+
+---
+
+## 9. 样例与产物
+
+| 路径 | 说明 |
+|------|------|
+| `samples/c/vmp_add.c` | 基础：算术/分支/数组/指针 call/全局/递归 fact/多次调用 |
+| `samples/c/vmp_complex.c` | 复杂控制流 + mix 表 |
+| `samples/run_vmp.sh` | 自动 clean vs VMP 输出对比 + 标记检查 |
+| `samples/out/` | 本地生成的 `.bc` / `.ll` / 可执行文件（gitignore） |
+
+```bash
+./samples/run_vmp.sh
+# 手动复杂样例
+clang -O0 -emit-llvm -c samples/c/vmp_complex.c -o /tmp/c.bc
+opt -load-pass-plugin=libHikari.dylib --passes='hikari(enable-cffobf)' \
+  /tmp/c.bc -o /tmp/c_obf.bc
+llvm-dis /tmp/c_obf.bc -o /tmp/c_obf.ll   # 搜 vmp_loop / switchVar
+```
+
+---
+
+## 10. 日志与排障
+
+| 日志 | 含义 |
+|------|------|
+| `Running Virtualization On X` | 进入 VMP |
+| `[VMP] X code=…B data=…B encrypt=0/1` | 译码成功 |
+| `Skip pre-CFF for VMP target …` | 混合模式：前置 CFF 已跳过 |
+| `[VMP] post-CFF on …` | 后置平坦化 |
+| `[VMP] skip X (…)` | 不支持，整函数跳过 |
+| `[VMP] translate fail X: …` | 译码失败 |
+| `[VMP] build fail, restore X` | 解释器 IR 校验失败，已恢复 |
+| `[VMP] fallback … CFF on non-virtualized` | VMP 失败时回退做 CFF |
+
+常见问题：
+
+1. **结果不对**：确认 `-O0`；有符号比较依赖 size 扩展；先 `VMPNOENC=1` 缩小问题面。  
+2. **体积过大**：只标注关键函数；慎用全局 `enable-vmp`；CFF 会再增大解释器。  
+3. **想看明文业务**：VMP 后业务只在 bytecode 里；对比用 `llvm-dis` 看 clean vs obf。  
+4. **递归/多次调用**：默认栈上下文，支持（如 `vmp_fact`）。  
+
+---
+
+## 11. 源码地图
+
+| 文件 | 内容 |
+|------|------|
+| `obfuscation/Virtualization.cpp` | 译码、加密、解释器生成、启动器、post-CFF |
+| `obfuscation/vmp/Opcode.h` | opcode / 子操作码常量 |
+| `obfuscation/include/Virtualization.h` | Pass 声明 |
+| `obfuscation/Obfuscation.cpp` | 调度顺序、pre-CFF 跳过、postFlatten 标志 |
+| `obfuscation/Flattening.cpp` | 后置 CFF 复用 |
+| `docs/VMP.md` | 本文档 |
+
+---
+
+## 12. 已知边界与后续方向
+
+**已具备**
+
+- 整数 IR 子集虚拟化、出站 call、常见 GEP、全局指针  
+- L1 双 seed 加密、栈上可重入、与 CFF 混合  
+- 失败 skip / restore、验收脚本  
+
+**未做 / 非目标（当前）**
+
+- 浮点 / 变参 / EH / 完整 IR  
+- 商业级 opcode 空间膨胀、多解释器克隆、运行时自修改  
+- Android 自定义 Linker / SO 抽取壳  
+- 按 BB 拆多段小 VM（降低「大块 bytecode」观感的进一步方案）  
+
+---
+
+## 13. 许可证
+
+与仓库主体相同，见根目录 `LICENSE`（Hikari 系 AGPL 相关说明以仓库为准）。

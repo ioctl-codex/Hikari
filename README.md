@@ -91,11 +91,48 @@ clang output.o -o output
 | `enable-funcwra` | 函数包装（已知不稳定） |
 | `enable-antihook` | AntiHook（AArch64 inline / antirebind） |
 | `enable-adb` | AntiDebugging |
+| `enable-vmp` | **IR 虚拟化（VMP）**：将函数译为自定义 bytecode + 解释器 |
 
 `enable-allobf` 会打开：`bcf`、`cff`、`sub`、`split`、`strcry`、`indibran`、`fco`、`funcwra`。  
-**不会**打开：`constenc`、`antihook`、`adb`（需单独指定）。
+**不会**打开：`constenc`、`antihook`、`adb`、`vmp`（需单独指定）。
 
-也可用环境变量（非 `hikari()` 参数时）：`BCFOBF`、`CFFOBF`、`SUBOBF`、`SPLITOBF`、`STRCRY`、`INDIBRAN`、`FCO`、`FUNCWRA`、`ANTIHOOK`、`ADB`、`CONSTENC`、`ALLOBF`。
+也可用环境变量（非 `hikari()` 参数时）：`BCFOBF`、`CFFOBF`、`SUBOBF`、`SPLITOBF`、`STRCRY`、`INDIBRAN`、`FCO`、`FUNCWRA`、`ANTIHOOK`、`ADB`、`CONSTENC`、`ALLOBF`、`VMP`。
+
+### VMP（`enable-vmp`）
+
+IR 级虚拟机保护：将函数译为自定义 bytecode + 栈上可重入解释器。
+
+| 方式 | 说明 |
+|------|------|
+| 函数标注 | `__attribute__((annotate("vmp")))`；排除 `novmp` |
+| 管线 | `hikari()` 仅处理标注；`hikari(enable-vmp)` 尝试模块内所有可译函数 |
+| 环境变量 | `VMP=1` 等同 `enable-vmp` |
+| 加密 | 默认开启 L1 双 seed（opcode + 整 BB）；`VMPNOENC=1` / 标注 `novmpenc` 关闭；`VMPENCRYPT=1` / 标注 `vmpenc` 强制开 |
+| 与平坦化结合 | `hikari(enable-vmp,enable-cffobf)`：**先 VMP、再 CFF**（自动跳过 VMP 目标上的前置 CFF，避免「平坦化后再整段虚拟化」体积爆炸） |
+| 加固 | `VMPHARDEN=1` / 标注 `vmpharden`：等同对虚拟化后函数+辅助函数跑 CFF（无 enable-cffobf 时也可单独开） |
+
+**支持的 IR（-O0 友好）**
+
+- 内存：`alloca` / `load` / `store`（alloca 结果为真实 VA，可外传指针）
+- 整数：binop / icmp（含有符号）/ cast / select
+- 控制流：`br` / `ret` / `unreachable`
+- `gep`：常量偏移、单索引、常见 `[0, i]` 数组形态
+- `call`：直接/间接，经 `vmp_ch_*` handler 出站
+- 全局变量 / 函数指针：启动器写入 data 槽
+
+**运行时模型**
+
+- 每调用独立：`data` / `ip` / 解密状态均在栈上 → **默认可重入**（含递归 VMP 函数）
+- 字节码：`@vmp_code_<fn>`；BB seed 表：`@vmp_seeds_<fn>`
+- 不支持则 **整函数 skip**（可观测 `[VMP] skip/translate fail` 日志），不损坏 Module
+
+**明确不支持（hard-fail skip）**
+
+- 变参、异常/EH、浮点、向量、复杂多动态索引 GEP
+
+建议目标函数 `-O0` / `optnone`。验收：`./samples/run_vmp.sh`。
+
+**完整文档**（架构 / 字节码 / 开关 / 与 CFF 混合 / 排障）：[`docs/VMP.md`](docs/VMP.md)。
 
 ### 已移除
 
@@ -114,6 +151,7 @@ clang output.o -o output
 ```bash
 # 先按上文编译插件，再：
 ./samples/run_demo.sh
+./samples/run_vmp.sh    # VMP 正确性验收
 ```
 
 详见 [`samples/README.md`](samples/README.md)。

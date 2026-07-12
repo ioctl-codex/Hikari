@@ -14,6 +14,7 @@ add_library(Hikari SHARED
         IndirectBranch.cpp
         FunctionWrapper.cpp
         ConstantEncryption.cpp
+        Virtualization.cpp
         Obfuscation.cpp
         )
 target_include_directories(Hikari PRIVATE ${CMAKE_SOURCE_DIR}/obfuscation)
