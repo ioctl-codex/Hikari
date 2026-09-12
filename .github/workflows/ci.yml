@@ -89,6 +89,21 @@ jobs:
           export HIKARI_OPT="$LLVM_PREFIX/bin/opt"
           ./tools/android-toolchain/smoke-test.sh
 
+      # The smoke test compiles *groups* of passes once each.  This one runs the
+      # cross product of samples, every pass on its own, the shipped pipelines
+      # and several PRNG seeds — the shape that caught the unsigned-operand,
+      # signed-GEP and constant-encryption bugs.  JOBS stays modest because a
+      # virtualization-heavy cell is memory-hungry.
+      - name: Differential stress (samples × passes × seeds)
+        run: |
+          set -euo pipefail
+          export HIKARI_PLUGIN="$PWD/build/obfuscation/libHikari.so"
+          export HIKARI_CC="$LLVM_PREFIX/bin/clang"
+          export HIKARI_OPT="$LLVM_PREFIX/bin/opt"
+          HIKARI_STRESS_SEEDS="${HIKARI_STRESS_SEEDS:-1 2 3}" \
+          HIKARI_STRESS_JOBS=4 \
+            ./tools/stress/stress-test.sh
+
       - name: Package the Android toolchain (full + slim)
         run: |
           set -euo pipefail

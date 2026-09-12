@@ -155,6 +155,21 @@ HIKARI_PLUGIN=build/obfuscation/libHikari.so \
   ./tools/android-toolchain/smoke-test.sh
 ```
 
+Then the differential stress gate, which is where most bugs in this fork were
+found — it runs the cross product of every sample, every pass on its own, the
+shipped pipelines and several PRNG seeds, and compares stdout, stderr and exit
+status against the clean build:
+
+```bash
+LLVM_PREFIX=/usr/lib/llvm-22 HIKARI_PLUGIN=build/obfuscation/libHikari.so \
+  ./tools/stress/stress-test.sh
+# HIKARI_STRESS_SEEDS="1 2 3"        seeds to sweep (default 1 2 3 4)
+# HIKARI_STRESS_SAMPLES="memory"     restrict the samples
+# HIKARI_STRESS_SETS="vmp=enable-vmp" restrict the pass sets
+# HIKARI_STRESS_JOBS=2               parallelism — keep it small on a low-RAM host,
+#                                    one virtualization cell can want a gigabyte
+```
+
 Package a relocatable toolchain — `--full` carries an NDK, `--slim` does not:
 
 ```bash
@@ -192,6 +207,13 @@ The plugin is upstream [PPKunOfficial/Hikari-fix](https://github.com/PPKunOffici
 * `-lwinpthread` no longer leaks out of the Windows branch.
 * The plugin links `libLLVM.so` instead of the static component archives, so the
   host does not abort with *"Option registered more than once"*.
+* `ConstantEncryption` no longer encrypts a global whose address escapes. The
+  pass encrypts an initializer and inserts the matching XOR at every load and
+  store; `ptrtoint @g` — which is how the virtualizer captures a global into its
+  data section, but also a plain `int *p = &g` — read the raw bytes and saw the
+  encrypted value. `vmp_add`'s `vmp_global` returned `14 * 0x57A4B4E1` instead
+  of 42 under `enable-constenc`. Such globals are now left unencrypted instead
+  of silently miscompiled.
 * The VMP interpreter sign-extends GEP displacements and cast sources from the
   *source* width. It used to zero-extend a GEP's byte offset (`p - 1` became
   `p + 0xFFFFFFFF`) and to read the sign bit of `sext` from the destination

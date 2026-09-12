@@ -127,7 +127,7 @@ else
         [[ -x "$readelf" ]] || readelf=readelf
         [[ -x "$nm" ]] || nm=nm
 
-        for s in vmp_add.c hello.c vmp_complex.c neg_idx.c; do
+        for s in vmp_add.c hello.c vmp_complex.c neg_idx.c arith.c control.c memory.c; do
             if ! HIKARI_PASSES='hikari(enable-vmp,enable-cffobf)' HIKARI_CC="$cc" \
                  "$W" -c "$HIKARI_ROOT/samples/c/$s" -o "$WORK/${s%.c}.o" >/dev/null 2>&1; then
                 bad "$s: android compile failed"; continue

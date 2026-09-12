@@ -209,6 +209,23 @@ struct ConstantEncryption : public ModulePass {
     return false;
   }
 
+  // This pass encrypts a global by rewriting its *use sites*: the initializer is
+  // XORed and the matching XOR is inserted after every load and before every
+  // store.  That is only sound while the address never leaves those
+  // instructions.  A use that is neither — `ptrtoint @g`, which is exactly how
+  // the virtualizer captures a global into its data section, but also a call
+  // argument, a comparison or another global's initializer — reads the raw
+  // bytes somewhere this rewrite cannot reach, and would then observe the
+  // encrypted initializer.  Skipping such globals keeps them correct; they are
+  // simply not something this pass can encrypt.
+  bool canRewriteAllUses(GlobalVariable *GV) {
+    for (User *U : GV->users()) {
+      if (!isa<LoadInst>(U) && !isa<StoreInst>(U))
+        return false;
+    }
+    return true;
+  }
+
   void EncryptConstants(Function &F) {
     for (Instruction &I : instructions(F)) {
       if (!shouldEncryptConstant(&I))
@@ -290,7 +307,7 @@ struct ConstantEncryption : public ModulePass {
 
   void HandleConstantIntInitializerGV(GlobalVariable *GVPtr) {
     if (!(flag || AreUsersInOneFunction(GVPtr)) || isDispatchOnceToken(GVPtr) ||
-        isAtomicLoaded(GVPtr))
+        isAtomicLoaded(GVPtr) || !canRewriteAllUses(GVPtr))
       return;
     // Prepare Types and Keys
     std::pair<ConstantInt *, ConstantInt *> keyandnew;
