@@ -104,6 +104,25 @@ jobs:
           HIKARI_STRESS_JOBS=4 \
             ./tools/stress/stress-test.sh
 
+      - name: Install qemu-user (for running the Android binaries)
+        run: sudo apt-get install -y --no-install-recommends qemu-user-static
+
+      # Compiling an object for aarch64 only proves the pass did not crash the
+      # *frontend*: it says nothing about whether the code still computes the
+      # right answer on a 32-bit target, where the pointer-size assumptions that
+      # produced the signed-GEP bug live.  This runs the binaries.  One seed is
+      # enough here — the seeded sweep is the host job's business — so the time
+      # goes into breadth of architectures instead.
+      - name: Cross-ABI execution under qemu
+        run: |
+          set -euo pipefail
+          export HIKARI_PLUGIN="$PWD/build/obfuscation/libHikari.so"
+          export HIKARI_OPT="$LLVM_PREFIX/bin/opt"
+          HIKARI_CROSS_ABIS="aarch64 armv7a" \
+          HIKARI_CROSS_SEEDS=1 \
+          HIKARI_CROSS_TIMEOUT=300 \
+            ./tools/stress/cross-run.sh
+
       - name: Package the Android toolchain (full + slim)
         run: |
           set -euo pipefail
