@@ -72,40 +72,46 @@ jobs:
       - name: Resolve the toolchain
         run: |
           set -euo pipefail
-          # Everything here comes from the runner when it declares it; the
-          # defaults only apply to a machine that declares nothing.
-          if [[ -z "${LLVM_PREFIX:-}" && -n "${HIKARI_OPT:-}" && -x "${HIKARI_OPT}" ]]; then
+          # Two trees, and they are legitimately not the same one.  HIKARI_OPT is
+          # the runtime that loads the plugin; a packaged toolchain ships it
+          # without headers.  LLVM_PREFIX is what the plugin is *built* against
+          # and needs lib/cmake/llvm.  Both come from the runner when it declares
+          # them; deriving the build tree from opt is only a convenience for a
+          # full LLVM install where one tree serves both roles.
+          if [[ -z "${LLVM_PREFIX:-}" && -n "${HIKARI_OPT:-}" ]]; then
             LLVM_PREFIX="$(cd "$(dirname "$HIKARI_OPT")/.." && pwd)"
           fi
           LLVM_PREFIX="${LLVM_PREFIX:-/usr/lib/llvm-22}"
+          HIKARI_OPT="${HIKARI_OPT:-$LLVM_PREFIX/bin/opt}"
           HIKARI_CC="${HIKARI_CC:-$LLVM_PREFIX/bin/clang}"
           {
             echo "LLVM_PREFIX=$LLVM_PREFIX"
+            echo "HIKARI_OPT=$HIKARI_OPT"
             echo "HIKARI_CC=$HIKARI_CC"
-            [[ -n "${HIKARI_OPT:-}" ]]   && echo "HIKARI_OPT=$HIKARI_OPT"
             [[ -n "${HIKARI_NDK:-}" ]]   && echo "HIKARI_NDK=$HIKARI_NDK"
             [[ -n "${LD_LIBRARY_PATH:-}" ]] && echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
-          echo "declared toolchain:"
-          echo "  LLVM_PREFIX=$LLVM_PREFIX"
-          echo "  HIKARI_OPT=${HIKARI_OPT:-<from LLVM_PREFIX>}"
-          echo "  HIKARI_CC=$HIKARI_CC"
-          echo "  HIKARI_NDK=${HIKARI_NDK:-<not declared, will download>}"
+          echo "toolchain:"
+          echo "  opt (loads the plugin): $HIKARI_OPT"
+          echo "  build tree:             $LLVM_PREFIX"
+          echo "  host clang:             $HIKARI_CC"
+          echo "  ndk:                    ${HIKARI_NDK:-<not declared, will download>}"
 
       - name: Check the toolchain is complete
         run: |
           set -euo pipefail
           missing=()
-          [[ -x "$LLVM_PREFIX/bin/opt" ]] || missing+=("$LLVM_PREFIX/bin/opt")
-          [[ -d "$LLVM_PREFIX/lib/cmake/llvm" ]] || missing+=("$LLVM_PREFIX/lib/cmake/llvm (needed to build the plugin)")
-          [[ -x "$HIKARI_CC" ]] || missing+=("$HIKARI_CC")
+          [[ -x "$HIKARI_OPT" ]] || missing+=("opt that loads the plugin: $HIKARI_OPT")
+          [[ -f "$LLVM_PREFIX/lib/cmake/llvm/LLVMConfig.cmake" ]] ||
+            missing+=("LLVM dev tree to build against: $LLVM_PREFIX/lib/cmake/llvm/LLVMConfig.cmake")
+          [[ -x "$HIKARI_CC" ]] || missing+=("host clang: $HIKARI_CC")
           if ((${#missing[@]})); then
             printf 'missing toolchain component: %s\n' "${missing[@]}" >&2
             echo "declare the paths on the runner (LLVM_PREFIX, HIKARI_OPT, HIKARI_CC," >&2
             echo "HIKARI_NDK) instead of relying on an install step; see docs/CI.md" >&2
             exit 1
           fi
-          "$LLVM_PREFIX/bin/opt" --version | head -1
+          "$HIKARI_OPT" --version | head -1
           "$HIKARI_CC" --version | head -1
 
       - name: Ensure qemu-user
