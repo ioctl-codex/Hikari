@@ -88,12 +88,29 @@ while read -r lib; do
 done < <(ldd "$LLVM_PREFIX/bin/opt" 2>/dev/null | awk '/=>/ {print $3}' | grep -E 'libLLVM|libz|libzstd|libtinfo' || true)
 [[ "$copied_libs" -gt 0 ]] || note "warning: no LLVM runtime libs copied (opt may need system LLVM 22)"
 
-# Also keep the versioned soname the plugin links against, if we saw it.
-for so in "$LLVM_PREFIX"/lib/libLLVM.so* /usr/lib/*/libLLVM.so*; do
-    [[ -f "$so" ]] || continue
-    base="$(basename "$so")"
-    [[ -e "$STAGE/llvm/lib/$base" ]] || cp -L "$so" "$STAGE/llvm/lib/$base"
-done 2>/dev/null || true
+# The plugin links against the same versioned libLLVM as opt.  Find that file by
+# its SONAME rather than globbing: /usr/lib/*/libLLVM.so* on a developer machine
+# holds every LLVM the distribution ever installed, and packing them all would
+# add hundreds of megabytes of libraries nothing loads — while still having to
+# guess which one matches.
+soname() { readelf -d "$1" 2>/dev/null | sed -n 's/.*SONAME.*\[\(libLLVM[^]]*\)\].*/\1/p' | head -1; }
+needed="$(sed -n 's/.*NEEDED.*\[\(libLLVM[^]]*\)\].*/\1/p' <<<"$(readelf -d "$HIKARI_PLUGIN" 2>/dev/null || true)" | head -1)"
+if [[ -z "$needed" ]]; then
+    note "warning: the plugin declares no libLLVM dependency (statically linked?)"
+elif [[ -e "$STAGE/llvm/lib/$needed" ]]; then
+    note "plugin's $needed already came from opt's runtime"
+else
+    for cand in "$LLVM_PREFIX"/lib/* /usr/lib/*/"$needed"; do
+        [[ -f "$cand" ]] || continue
+        [[ "$(soname "$cand")" == "$needed" ]] || continue
+        cp -L "$cand" "$STAGE/llvm/lib/$needed"
+        copied_libs=$((copied_libs + 1))
+        note "plugin's $needed taken from $cand"
+        break
+    done
+    [[ -e "$STAGE/llvm/lib/$needed" ]] ||
+        note "warning: could not find $needed for the plugin on this host"
+fi
 
 # opt and libLLVM ship with full symbol tables; the archive only needs the
 # dynamic ones.  Strip through a temporary so a failed strip cannot leave a
