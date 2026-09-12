@@ -12,6 +12,10 @@
 #   4. Seeded sweep: the same sample is re-obfuscated across fixed PRNG seeds.
 #      The obfuscator seeds itself from the wall clock, so a miscompilation can
 #      hide behind a lucky draw; pinning -aesSeed makes it reproduce.
+#   5. Debug build: -g survives the LLVM 21 -> 22 -> 21 hand-off and the result
+#      still carries DWARF.  This is the one check that would have caught the
+#      "error: Invalid record" failure, which only appears once debug metadata
+#      is in the module.
 #
 # Usage:
 #   HIKARI_NDK=/path/ndk HIKARI_CC=/usr/lib/llvm-22/bin/clang \
@@ -134,7 +138,13 @@ else
             fi
             arch="$("$readelf" -h "$WORK/${s%.c}.o" 2>/dev/null | awk '/Machine:/ {print $2, $3}')"
             [[ "$arch" == *AArch64* ]] || { bad "$s: expected AArch64 object, got '$arch'"; continue; }
-            if "$nm" "$WORK/${s%.c}.o" 2>/dev/null | grep -q 'vmp_ch_'; then
+            # Count the whole stream, do not grep -q for it.  With `set -o
+            # pipefail`, `grep -q` exiting on its first match SIGPIPEs nm, and
+            # the pipeline then reports failure even though the symbols are
+            # there — which made this line pass or fail depending on how much
+            # nm had already written.
+            vmp_hits="$("$nm" "$WORK/${s%.c}.o" 2>/dev/null | grep -c 'vmp_ch_' || true)"
+            if [[ "$vmp_hits" -gt 0 ]]; then
                 ok "$s: AArch64 object with virtualized handlers"
             else
                 bad "$s: AArch64 object but no vmp_ch_* handlers"
@@ -150,6 +160,28 @@ else
             ok "different pass sets produce different objects"
         else
             bad "different pass sets produced identical objects"
+        fi
+
+        # Bitcode crossed the version boundary in the wrong direction.  Stage 2
+        # is LLVM 22 and stage 3 is the NDK's LLVM 21, and bitcode only reads
+        # downwards: a *plain* -O0 module happens to use records LLVM 21 still
+        # knows, but add debug metadata and every -g build died in stage 3 with
+        # "error: Invalid record".  Guards the hand-off *and* the debug info:
+        # dropping -g inside the wrapper would also silence the failure, so the
+        # DWARF check is the part that matters.
+        if ! HIKARI_PASSES='hikari(enable-bcfobf,enable-cffobf,enable-splitobf)' HIKARI_CC="$cc" \
+             "$W" --target=aarch64-linux-android24 -static -O0 -g \
+             "$HIKARI_ROOT/samples/c/vmp_add.c" -o "$WORK/dbg.bin" >/dev/null 2>&1; then
+            bad "-g build failed (IR hand-off across the LLVM 21/22 boundary)"
+        else
+            dwarfdump="$ndk_bin/llvm-dwarfdump"
+            [[ -x "$dwarfdump" ]] || dwarfdump=dwarfdump
+            cu="$("$dwarfdump" --debug-info "$WORK/dbg.bin" 2>/dev/null | grep -c 'DW_TAG_compile_unit' || true)"
+            if [[ "$cu" -gt 0 ]]; then
+                ok "-g build succeeds and keeps its DWARF ($cu compile units)"
+            else
+                bad "-g build produced no debug info"
+            fi
         fi
     fi
 fi

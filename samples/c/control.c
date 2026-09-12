@@ -8,6 +8,12 @@
 // loop body rather than a crash, which is why the counters below are printed
 // per shape instead of being folded into one number.
 //
+// Recursion is deliberately shallow.  A virtualized recursive function costs
+// ~2400x the cycles of the original, so fib(15) spends half a minute under
+// qemu and reads like a hang in a timeout-based gate; fib(12) recurses just as
+// deep and keeps the cross-ABI matrix affordable.  Depth, not call count, is
+// what exercises the interpreter's call opcode.
+//
 // Build at -O0.
 
 #include <stdio.h>
@@ -176,6 +182,6 @@ int main(void) {
   printf("shapes=%d %d %d %d\n", switch_dense(9), switch_sparse(-1000),
          goto_loop(10), computed_goto(3));
   printf("fnptr=%d %d\n", through_pointer(2, 0), through_pointer(2, 1));
-  printf("rec=%d %d %d\n", fib(15), is_even(20), is_odd(20));
+  printf("rec=%d %d %d\n", fib(12), is_even(20), is_odd(20));
   return computed_goto(3) == 55 ? 0 : 1;
 }

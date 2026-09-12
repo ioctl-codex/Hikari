@@ -5,16 +5,38 @@
 # Android NDK clang (LLVM 21) and this plugin (LLVM 22) cannot share a process:
 # LLVM has no stable plugin ABI, so a plugin built for LLVM 22 must be loaded by
 # an LLVM 22 host.  Instead of rebuilding clang, this wrapper splits the compile
-# into three stages so that only *bitcode* crosses the version boundary:
+# into three stages so that only IR crosses the version boundary:
 #
-#   1. <ndk>/bin/clang  -emit-llvm -c src.c -o src.bc          (LLVM 21)
-#   2. opt-22 -load-pass-plugin=libHikari.so --passes=…        (LLVM 22 obfuscates)
-#   3. <ndk>/bin/clang  src.obf.bc -o src.o / link             (LLVM 21)
+#   1. <ndk>/bin/clang  -emit-llvm -S src.c -o src.ll          (LLVM 21)
+#   2. opt-22 -load-pass-plugin=libHikari.so --passes=… -S     (LLVM 22 obfuscates)
+#   3. <ndk>/bin/clang  src.obf.ll -o src.o / link             (LLVM 21)
 #
-# LLVM reads bitcode produced by older releases, so plain clang can hand the
-# module to the obfuscator and take it back.  The product is an ordinary NDK
-# build artifact: same target, same ABI, same runtime — only the IR ran through
-# Hikari.
+# Every hand-off is *text* IR, and both halves of that matter.  The stages are
+# one version apart, and X.llvm bitcode only reads in one direction — a newer
+# release reads what an older one wrote, never the reverse, and stage 2 is the
+# newer tool.  Two distinct failures follow from handing over the wrong way, and
+# each was measured against the NDK's clang 21 and LLVM 22.1.8 rather than
+# assumed:
+#
+#   * Bitcode out of stage 2 dies in stage 3 with "error: Invalid record"
+#     whenever the module carries debug info: LLVM 22 encodes that metadata with
+#     records LLVM 21 has no reader for.  A plain -O0 module happens to use
+#     records LLVM 21 still knows, which is exactly why this hid for so long —
+#     every `-g` build was broken while every release build was fine.
+#   * Text out of stage 2 whose *input* was bitcode dies too: a module read from
+#     bitcode has explicit per-location memory effects, so LLVM 22 prints them
+#     as `memory(read, target_mem0: none, target_mem1: none)` — a location
+#     spelling LLVM 21's parser rejects.  Parse the same module from text and
+#     the same pass prints `memory(read)`.
+#
+# So stage 1 emits text as well: text in, text out keeps the attribute spelling
+# compact and debug info intact, and no bitcode ever crosses the boundary.  The
+# cost is re-parsing text instead of bitcode, ~0.4s per translation unit for opt
+# (0.22s vs 0.20s) and clang (0.44s vs 0.06s on a 2MB module) — not worth losing
+# debug builds, or silently rewriting function attributes, over.
+#
+# The product is still an ordinary NDK build artifact: same target, same ABI,
+# same runtime — only the IR ran through Hikari.
 #
 # Environment
 #   HIKARI_NDK       Path to an Android NDK.  Optional in a packaged --full
@@ -210,50 +232,93 @@ for _l in "$SELF_DIR/../llvm/lib" "$SELF_DIR/../lib/llvm/lib"; do
 done
 unset _l
 
-obf_bc() { # <in.bc> <out.bc>
+# A module that came from bitcode carries explicit per-location memory effects,
+# which LLVM 22 prints as `memory(read, target_mem0: none, target_mem1: none)` —
+# spelling LLVM 21's parser rejects (it knows argmem and inaccessiblemem only),
+# so stage 3 would refuse the file.  Stage 1 emits text precisely so this does
+# not happen, but the explicit `.bc` input path can still arrive this way.
+#
+# Dropping a `target_memN: none` clause is not a semantic change: it restates the
+# default that the location is untouched, so a reader that has never heard of the
+# location evaluates the attribute exactly as before.  Only attribute-group lines
+# are rewritten (never string data or instruction text), and a clause claiming a
+# real effect is deliberately left alone so the build fails loudly instead of
+# silently weakening an attribute.
+normalize_attrs() { # <file.ll>
+    sed -i -E '/^attributes #[0-9]+ = \{/ s/, *target_mem[0-9]+: none//g' "$1"
+}
+
+# Emits text IR: see the note at the top of this file for why bitcode and text
+# are not interchangeable across the version boundary.  Callers pass a .ll
+# output path.
+obf_bc() { # <in.ll> <out.ll>
     log "opt $2"
-    "$OPT" -load-pass-plugin="$PLUGIN" --passes="$PASSES" "${SEED_ARGS[@]}" "$1" -o "$2"
+    "$OPT" -load-pass-plugin="$PLUGIN" --passes="$PASSES" "${SEED_ARGS[@]}" \
+        "$1" -S -o "$2"
+    normalize_attrs "$2"
+}
+
+# A module that arrives as bitcode prints its memory attributes in LLVM 22's
+# `target_memN` spelling, which stage 3 cannot parse; re-emitting it as text
+# first normalises that (see the note at the top of this file).  Cheap, and only
+# on the explicit .bc input path.
+to_text() { # <in.bc|in.ll> <out.ll>
+    case "$1" in
+        *.bc) "$OPT" -S "$1" -o "$2" || die "could not read bitcode: $1" ;;
+        *)    cp -f "$1" "$2" ;;
+    esac
 }
 
 # ------------------------------------------------------- stage 1 + 2: .bc ---
-OBF_BCS=()
+OBF_IR=()    # obfuscated IR, in input order
+IR_SRC=()    # the input each entry came from, so -c can name its object
 n=0
 for src in "${SOURCES[@]}"; do
     [[ -n "$src" ]] || continue
-    bc="$TMP/s$n.bc"
-    log "bitcode $src"
-    "$CLANG" "${FWD[@]}" "${DEPF[@]}" "$OPT_LEVEL" "${STAGE1_EXTRA[@]}" -emit-llvm -c "$src" -o "$bc"
-    obf_bc "$bc" "$TMP/s$n.obf.bc"
-    OBF_BCS+=("$TMP/s$n.obf.bc")
+    ir="$TMP/s$n.ll"
+    log "ir $src"
+    "$CLANG" "${FWD[@]}" "${DEPF[@]}" "$OPT_LEVEL" "${STAGE1_EXTRA[@]}" -emit-llvm -S "$src" -o "$ir"
+    obf_bc "$ir" "$TMP/s$n.obf.ll"
+    OBF_IR+=("$TMP/s$n.obf.ll")
+    IR_SRC+=("$src")
     n=$((n+1))
 done
 
 for src in "${BC_INPUTS[@]}"; do
     [[ -n "$src" ]] || continue
-    obf_bc "$src" "$TMP/b$n.obf.bc"
-    OBF_BCS+=("$TMP/b$n.obf.bc")
+    to_text "$src" "$TMP/b$n.in.ll"
+    obf_bc "$TMP/b$n.in.ll" "$TMP/b$n.obf.ll"
+    OBF_IR+=("$TMP/b$n.obf.ll")
+    IR_SRC+=("$src")
     n=$((n+1))
 done
 
 # ----------------------------------------------------------- stage 3: out ---
 if [[ "$MODE" == "compile" ]]; then
-    if [[ ${#SOURCES[@]} -eq 1 && ${#BC_INPUTS[@]} -eq 0 ]]; then
-        [[ -n "$OUTPUT" ]] || die "multi-file -c without -o is not supported"
+    # One translation unit and an explicit -o: hand clang the path.  Keying this
+    # off the source list alone sent `-c file.bc -o out.o` down the multi-source
+    # path below, which derives the name from the source and dropped -o entirely
+    # (the object landed in ./s0.o).
+    if [[ -n "$OUTPUT" && ${#OBF_IR[@]} -eq 1 ]]; then
         log "object $OUTPUT"
-        exec "$CLANG" "${FWD[@]}" -c "${OBF_BCS[0]}" -o "$OUTPUT"
+        exec "$CLANG" "${FWD[@]}" -c "${OBF_IR[0]}" -o "$OUTPUT"
     fi
-    # Several sources with -c: clang drops one .o per source into the cwd.
-    for idx in "${!OBF_BCS[@]}"; do
-        out="$(basename "${SOURCES[$idx]:-s$idx}")"
+    [[ -n "$OUTPUT" ]] && die "-c with several translation units cannot use -o"
+    # Several sources with -c: clang drops one .o per source into the cwd, named
+    # after that source.  Deriving the name from $SOURCES indexed the wrong list
+    # whenever a .ll/.bc input was involved (those live in $BC_INPUTS and are
+    # appended after the sources), which quietly wrote ./s0.o instead of ./a.o.
+    for idx in "${!OBF_IR[@]}"; do
+        out="$(basename "${IR_SRC[$idx]:-s$idx}")"
         out="${out%.*}.o"
         log "object $out"
-        "$CLANG" "${FWD[@]}" -c "${OBF_BCS[$idx]}" -o "$out"
+        "$CLANG" "${FWD[@]}" -c "${OBF_IR[$idx]}" -o "$out"
     done
     exit 0
 fi
 
 # Compile + link in a single invocation.
-LINK=("${FWD[@]}" "${OBF_BCS[@]}")
+LINK=("${FWD[@]}" "${OBF_IR[@]}")
 [[ ${#OTHER_INPUTS[@]} -gt 0 ]] && LINK+=("${OTHER_INPUTS[@]}")
 [[ -n "$OUTPUT" ]] && LINK+=(-o "$OUTPUT")
 exec "$CLANG" "${LINK[@]}"
