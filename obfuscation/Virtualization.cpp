@@ -1259,42 +1259,46 @@ static bool buildInterpreter(Function *Host, VMPContext &V) {
     AllocaInst *SzT = B.CreateAlloca(I8);
     Value *ResOff = callReadVar(B, SzT);
     Value *Sz = B.CreateLoad(I8, SzT);
-    // Signed ops need sext; always sext then mask for arithmetic consistency.
+    // Operands exist in two shapes and the opcode decides which one is right.
+    //  * unsigned ops (udiv/urem/lshr) and every shift *count* must be
+    //    zero-extended: sign-extending them feeds the operand's high bit into
+    //    the result (`udiv i32 0x80000000, 4` used to be computed as
+    //    `udiv i64 0xFFFFFFFF80000000, 4`) and a negative shift count is UB.
+    //  * signed ops (sdiv/srem/ashr) need the sign-extended form.
+    //  * add/sub/mul/shl/and/or/xor agree on the low Sz bytes either way, so
+    //    the zero-extended pair keeps them well defined.
     AllocaInst *LSz = B.CreateAlloca(I8);
     AllocaInst *RSz = B.CreateAlloca(I8);
-    Value *LHS = sextToI64(B, I8, I64, callEval(B, LSz), B.CreateLoad(I8, LSz));
-    Value *RHS = sextToI64(B, I8, I64, callEval(B, RSz), B.CreateLoad(I8, RSz));
-    LHS = maskToSize(B, I8, I64, LHS, Sz);
-    RHS = maskToSize(B, I8, I64, RHS, Sz);
-    // Re-sext after mask for signed div/shift so high bits match size.
-    LHS = sextToI64(B, I8, I64, LHS, Sz);
-    RHS = sextToI64(B, I8, I64, RHS, Sz);
+    Value *LHSU = maskToSize(B, I8, I64, callEval(B, LSz), Sz);
+    Value *RHSU = maskToSize(B, I8, I64, callEval(B, RSz), Sz);
+    Value *LHSS = sextToI64(B, I8, I64, LHSU, Sz);
+    Value *RHSS = sextToI64(B, I8, I64, RHSU, Sz);
 
     auto *Def = BasicBlock::Create(Ctx, "binop_def", Host);
     auto *Join = BasicBlock::Create(Ctx, "binop_join", Host);
     AllocaInst *RA = B.CreateAlloca(I64);
     SwitchInst *BS = B.CreateSwitch(Sub, Def, 13);
 
-    auto add = [&](uint8_t CodeV, auto Fn) {
+    auto add = [&](uint8_t CodeV, auto Fn, Value *L, Value *R) {
       auto *BB = BasicBlock::Create(Ctx, "binop_c", Host);
       BS->addCase(cast<ConstantInt>(ConstantInt::get(I8, CodeV)), BB);
       IRBuilder<> CB(BB);
-      CB.CreateStore(Fn(CB, LHS, RHS), RA);
+      CB.CreateStore(Fn(CB, L, R), RA);
       CB.CreateBr(Join);
     };
-    add(BIN_ADD, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateAdd(L, R); });
-    add(BIN_SUB, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateSub(L, R); });
-    add(BIN_MUL, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateMul(L, R); });
-    add(BIN_UDIV, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateUDiv(L, R); });
-    add(BIN_SDIV, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateSDiv(L, R); });
-    add(BIN_UREM, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateURem(L, R); });
-    add(BIN_SREM, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateSRem(L, R); });
-    add(BIN_SHL, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateShl(L, R); });
-    add(BIN_LSHR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateLShr(L, R); });
-    add(BIN_ASHR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateAShr(L, R); });
-    add(BIN_AND, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateAnd(L, R); });
-    add(BIN_OR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateOr(L, R); });
-    add(BIN_XOR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateXor(L, R); });
+    add(BIN_ADD, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateAdd(L, R); }, LHSU, RHSU);
+    add(BIN_SUB, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateSub(L, R); }, LHSU, RHSU);
+    add(BIN_MUL, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateMul(L, R); }, LHSU, RHSU);
+    add(BIN_UDIV, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateUDiv(L, R); }, LHSU, RHSU);
+    add(BIN_SDIV, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateSDiv(L, R); }, LHSS, RHSS);
+    add(BIN_UREM, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateURem(L, R); }, LHSU, RHSU);
+    add(BIN_SREM, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateSRem(L, R); }, LHSS, RHSS);
+    add(BIN_SHL, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateShl(L, R); }, LHSU, RHSU);
+    add(BIN_LSHR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateLShr(L, R); }, LHSU, RHSU);
+    add(BIN_ASHR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateAShr(L, R); }, LHSS, RHSS);
+    add(BIN_AND, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateAnd(L, R); }, LHSU, RHSU);
+    add(BIN_OR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateOr(L, R); }, LHSU, RHSU);
+    add(BIN_XOR, [](IRBuilder<> &B, Value *L, Value *R) { return B.CreateXor(L, R); }, LHSU, RHSU);
 
     IRBuilder<> BD(Def);
     BD.CreateStore(ConstantInt::get(I64, 0), RA);

@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+#
+# hikari-clang — Android NDK clang driver with Hikari obfuscation passes.
+#
+# Android NDK clang (LLVM 21) and this plugin (LLVM 22) cannot share a process:
+# LLVM has no stable plugin ABI, so a plugin built for LLVM 22 must be loaded by
+# an LLVM 22 host.  Instead of rebuilding clang, this wrapper splits the compile
+# into three stages so that only *bitcode* crosses the version boundary:
+#
+#   1. <ndk>/bin/clang  -emit-llvm -c src.c -o src.bc          (LLVM 21)
+#   2. opt-22 -load-pass-plugin=libHikari.so --passes=…        (LLVM 22 obfuscates)
+#   3. <ndk>/bin/clang  src.obf.bc -o src.o / link             (LLVM 21)
+#
+# LLVM reads bitcode produced by older releases, so plain clang can hand the
+# module to the obfuscator and take it back.  The product is an ordinary NDK
+# build artifact: same target, same ABI, same runtime — only the IR ran through
+# Hikari.
+#
+# Environment
+#   HIKARI_NDK       Path to an Android NDK (required unless HIKARI_CC is set).
+#   HIKARI_CC        Explicit clang to use instead of the NDK's.
+#   HIKARI_PLUGIN    libHikari.so.  Defaults to ../lib/, then build/obfuscation/.
+#   HIKARI_OPT       LLVM 22 `opt`.  Defaults to ../llvm/bin/opt, then PATH.
+#   HIKARI_PASSES    Pipeline, e.g. 'hikari(enable-vmp,enable-cffobf)'.
+#   HIKARI_OBF       0 (or "off") = pure passthrough to clang.
+#   HIKARI_OPT_LEVEL Stage-1 opt level; defaults to -O0 (Hikari targets -O0 IR).
+#   HIKARI_SEED      Integer PRNG seed (LLVM -aesSeed).  The obfuscator seeds
+#                    itself from the wall clock by default, so pinning this
+#                    gives byte-reproducible output and lets a failing build be
+#                    replayed exactly.
+#   HIKARI_VERBOSE   1 = echo each stage.
+#
+# Exit codes follow clang's.
+
+set -euo pipefail
+
+# Plain "${arr[@]}" on an empty array is only expansion-safe (no stray empty
+# word under `set -u`) from bash 4.4 on.
+if [[ "${BASH_VERSINFO[0]:-0}" -lt 4 ||
+      ( "${BASH_VERSINFO[0]:-0}" -eq 4 && "${BASH_VERSINFO[1]:-0}" -lt 4 ) ]]; then
+    printf 'hikari-clang: bash >= 4.4 required (found %s)\n' "${BASH_VERSION:-unknown}" >&2
+    exit 1
+fi
+
+die() { printf 'hikari-clang: %s\n' "$*" >&2; exit 1; }
+log() { [[ "${HIKARI_VERBOSE:-0}" == "1" ]] && printf 'hikari-clang: %s\n' "$*" >&2; return 0; }
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HIKARI_ROOT="${HIKARI_ROOT:-$(cd "$SELF_DIR/../.." && pwd)}"
+
+# ---------------------------------------------------------------- locators ---
+first_existing() {
+    local c
+    for c in "$@"; do
+        [[ -n "$c" && -f "$c" ]] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+find_opt() {
+    if [[ -n "${HIKARI_OPT:-}" ]]; then
+        [[ -x "$HIKARI_OPT" ]] || die "HIKARI_OPT=$HIKARI_OPT is not executable"
+        printf '%s' "$HIKARI_OPT"; return 0
+    fi
+    local hit
+    if hit="$(first_existing \
+        "$SELF_DIR/../llvm/bin/opt" \
+        "$SELF_DIR/../lib/llvm/bin/opt" \
+        "$HIKARI_ROOT/build/llvm/bin/opt")"; then
+        printf '%s' "$hit"; return 0
+    fi
+    if command -v opt-22 >/dev/null 2>&1; then command -v opt-22; return 0; fi
+    if command -v opt >/dev/null 2>&1; then command -v opt; return 0; fi
+    return 1
+}
+
+find_clang() {
+    if [[ -n "${HIKARI_CC:-}" ]]; then
+        printf '%s' "$HIKARI_CC"; return 0
+    fi
+    if [[ -n "${HIKARI_NDK:-}" ]]; then
+        local hit
+        if hit="$(first_existing \
+            "$HIKARI_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            "$HIKARI_NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang" \
+            "$HIKARI_NDK/toolchains/llvm/prebuilt/darwin-arm64/bin/clang" \
+            "$HIKARI_NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe")"; then
+            printf '%s' "$hit"; return 0
+        fi
+        die "no clang under HIKARI_NDK=$HIKARI_NDK (expected toolchains/llvm/prebuilt/*/bin/clang)"
+    fi
+    # Packaged toolchain layout: the real clang lives next to this script.
+    if [[ -x "$SELF_DIR/../clang-real" ]]; then
+        printf '%s' "$SELF_DIR/../clang-real"; return 0
+    fi
+    if command -v clang >/dev/null 2>&1; then command -v clang; return 0; fi
+    return 1
+}
+
+PLUGIN="$(first_existing \
+    "${HIKARI_PLUGIN:-}" \
+    "$SELF_DIR/../lib/libHikari.so" \
+    "$SELF_DIR/../lib/libHikari.dylib" \
+    "$HIKARI_ROOT/build/obfuscation/libHikari.so" \
+    "$HIKARI_ROOT/build/obfuscation/libHikari.dylib" \
+    "$HIKARI_ROOT/build-llvm22/obfuscation/libHikari.so" \
+    "$HIKARI_ROOT/build-llvm22/obfuscation/libHikari.dylib")" \
+    || die "libHikari plugin not found (set HIKARI_PLUGIN=/path/to/libHikari.so)"
+
+CLANG="$(find_clang)" || die "clang not found (set HIKARI_NDK or HIKARI_CC)"
+
+PASSES="${HIKARI_PASSES:-hikari(enable-bcfobf,enable-cffobf,enable-subobf,enable-splitobf,enable-strcry,enable-indibran,enable-fco)}"
+OPT_LEVEL="${HIKARI_OPT_LEVEL:--O0}"
+
+SEED_ARGS=()
+if [[ -n "${HIKARI_SEED:-}" ]]; then
+    [[ "$HIKARI_SEED" =~ ^[0-9]+$ ]] || die "HIKARI_SEED must be a non-negative integer"
+    SEED_ARGS=(-aesSeed="$HIKARI_SEED")
+fi
+
+# ------------------------------------------------------------ passthrough? ---
+if [[ "${HIKARI_OBF:-1}" == "0" || "${HIKARI_OBF:-1}" == "off" ]]; then
+    exec "$CLANG" "$@"
+fi
+
+ARGS=("$@")
+[[ ${#ARGS[@]} -eq 0 ]] && exec "$CLANG"
+
+OPT="$(find_opt)" || die "LLVM 22 'opt' not found (set HIKARI_OPT=/path/to/opt)"
+
+# ------------------------------------------------------------------ parse ---
+FWD=()              # flags forwarded to clang in every stage
+DEPF=()             # dependency-generation flags (stage 1 only)
+SOURCES=()          # translatable C/C++ sources
+BC_INPUTS=()        # .bc/.ll inputs (obfuscated directly)
+OTHER_INPUTS=()     # .o/.a/.so/.s inputs — passed through untouched
+OUTPUT=""
+MODE=link           # link | compile | passthrough
+DEP_WANTS=0         # -M / -MM (imply -E)
+
+need_val() { [[ $# -ge 2 ]] || die "$1 requires an argument"; }
+
+i=0
+while (( i < ${#ARGS[@]} )); do
+    a="${ARGS[$i]}"
+    case "$a" in
+        -c) MODE=compile ;;
+        -E|-fsyntax-only|-print-*|--version|-v|--help|-emit-llvm) MODE=passthrough ;;
+        -M|-MM) MODE=passthrough; DEP_WANTS=1 ;;
+        -MD|-MMD|-MP|-MG) DEPF+=("$a") ;;
+        -MF|-MT|-MQ) need_val "$a" "${ARGS[@]:$((i+1))}"
+                     DEPF+=("$a" "${ARGS[$((i+1))]}"); i=$((i+2)); continue ;;
+        -o) need_val "$a" "${ARGS[@]:$((i+1))}"; OUTPUT="${ARGS[$((i+1))]}"; i=$((i+2)); continue ;;
+        -o*) OUTPUT="${a#-o}" ;;
+        -x) need_val "$a" "${ARGS[@]:$((i+1))}"
+            FWD+=("$a" "${ARGS[$((i+1))]}"); i=$((i+2)); continue ;;
+        # LTO replaces the IR pipeline with the link-time plugin: Hikari cannot
+        # run there, and silently dropping it would hide the obfuscation gap.
+        -flto|-flto=*|-fuse-ld=*) printf 'hikari-clang: dropping %s (incompatible with IR pass pipeline)\n' "$a" >&2 ;;
+        *.c|*.cc|*.cp|*.cpp|*.cxx|*.c++|*.C|*.i|*.ii|*.m|*.mm) SOURCES+=("$a") ;;
+        *.bc|*.ll) BC_INPUTS+=("$a") ;;
+        *.o|*.a|*.so|*.so.*|*.lo|*.s|*.S) OTHER_INPUTS+=("$a"); MODE=link ;;
+        *) FWD+=("$a") ;;
+    esac
+    i=$((i+1))
+done
+
+# Nothing to hook (syntax check / preprocess / explicit bitcode output).
+if [[ "$MODE" == "passthrough" && ${#SOURCES[@]} -eq 0 && ${#BC_INPUTS[@]} -eq 0 ]]; then
+    exec "$CLANG" "${ARGS[@]}"
+fi
+
+# Pure link line (objects and archives only).
+if [[ ${#SOURCES[@]} -eq 0 && ${#BC_INPUTS[@]} -eq 0 ]]; then
+    exec "$CLANG" "${ARGS[@]}"
+fi
+
+log "clang:   $CLANG"
+log "opt:     $OPT"
+log "plugin:  $PLUGIN"
+log "passes:  $PASSES"
+log "seed:    ${HIKARI_SEED:-(time-based)}"
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/hikari-clang.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+
+# `-O0` alone still tags every function `optnone`, which makes LLVM skip passes
+# on it; -disable-O0-optnone is what lets Hikari touch -O0 code.
+STAGE1_EXTRA=(-Xclang -disable-O0-optnone)
+for f in "${FWD[@]}"; do
+    case "$f" in -O0|-O1|-O2|-O3|-Os|-Oz|-Ofast) STAGE1_EXTRA=(-Xclang -disable-O0-optnone); break ;; esac
+done
+[[ "$DEP_WANTS" == "1" ]] && STAGE1_EXTRA+=("-O0")
+
+# Packaged toolchains ship LLVM's runtime next to opt; point the loader at it so
+# the archive works on a machine without libLLVM.so.22 installed.
+for _l in "$SELF_DIR/../llvm/lib" "$SELF_DIR/../lib/llvm/lib"; do
+    [[ -d "$_l" ]] && export LD_LIBRARY_PATH="$_l${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
+unset _l
+
+obf_bc() { # <in.bc> <out.bc>
+    log "opt $2"
+    "$OPT" -load-pass-plugin="$PLUGIN" --passes="$PASSES" "${SEED_ARGS[@]}" "$1" -o "$2"
+}
+
+# ------------------------------------------------------- stage 1 + 2: .bc ---
+OBF_BCS=()
+n=0
+for src in "${SOURCES[@]}"; do
+    [[ -n "$src" ]] || continue
+    bc="$TMP/s$n.bc"
+    log "bitcode $src"
+    "$CLANG" "${FWD[@]}" "${DEPF[@]}" "$OPT_LEVEL" "${STAGE1_EXTRA[@]}" -emit-llvm -c "$src" -o "$bc"
+    obf_bc "$bc" "$TMP/s$n.obf.bc"
+    OBF_BCS+=("$TMP/s$n.obf.bc")
+    n=$((n+1))
+done
+
+for src in "${BC_INPUTS[@]}"; do
+    [[ -n "$src" ]] || continue
+    obf_bc "$src" "$TMP/b$n.obf.bc"
+    OBF_BCS+=("$TMP/b$n.obf.bc")
+    n=$((n+1))
+done
+
+# ----------------------------------------------------------- stage 3: out ---
+if [[ "$MODE" == "compile" ]]; then
+    if [[ ${#SOURCES[@]} -eq 1 && ${#BC_INPUTS[@]} -eq 0 ]]; then
+        [[ -n "$OUTPUT" ]] || die "multi-file -c without -o is not supported"
+        log "object $OUTPUT"
+        exec "$CLANG" "${FWD[@]}" -c "${OBF_BCS[0]}" -o "$OUTPUT"
+    fi
+    # Several sources with -c: clang drops one .o per source into the cwd.
+    for idx in "${!OBF_BCS[@]}"; do
+        out="$(basename "${SOURCES[$idx]:-s$idx}")"
+        out="${out%.*}.o"
+        log "object $out"
+        "$CLANG" "${FWD[@]}" -c "${OBF_BCS[$idx]}" -o "$out"
+    done
+    exit 0
+fi
+
+# Compile + link in a single invocation.
+LINK=("${FWD[@]}" "${OBF_BCS[@]}")
+[[ ${#OTHER_INPUTS[@]} -gt 0 ]] && LINK+=("${OTHER_INPUTS[@]}")
+[[ -n "$OUTPUT" ]] && LINK+=(-o "$OUTPUT")
+exec "$CLANG" "${LINK[@]}"
