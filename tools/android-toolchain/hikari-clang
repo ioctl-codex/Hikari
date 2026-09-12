@@ -17,7 +17,8 @@
 # Hikari.
 #
 # Environment
-#   HIKARI_NDK       Path to an Android NDK (required unless HIKARI_CC is set).
+#   HIKARI_NDK       Path to an Android NDK.  Optional in a packaged --full
+#                    toolchain, which carries its own NDK under ../ndk/.
 #   HIKARI_CC        Explicit clang to use instead of the NDK's.
 #   HIKARI_PLUGIN    libHikari.so.  Defaults to ../lib/, then build/obfuscation/.
 #   HIKARI_OPT       LLVM 22 `opt`.  Defaults to ../llvm/bin/opt, then PATH.
@@ -89,7 +90,12 @@ find_clang() {
         fi
         die "no clang under HIKARI_NDK=$HIKARI_NDK (expected toolchains/llvm/prebuilt/*/bin/clang)"
     fi
-    # Packaged toolchain layout: the real clang lives next to this script.
+    # Packaged --full toolchain: the NDK prebuilt tree travels with this script,
+    # so the machine doing the build needs neither an NDK nor an NDK path.
+    local bundled
+    for bundled in "$SELF_DIR"/../ndk/toolchains/llvm/prebuilt/*/bin/clang; do
+        [[ -x "$bundled" ]] && { printf '%s' "$bundled"; return 0; }
+    done
     if [[ -x "$SELF_DIR/../clang-real" ]]; then
         printf '%s' "$SELF_DIR/../clang-real"; return 0
     fi
@@ -117,6 +123,11 @@ if [[ -n "${HIKARI_SEED:-}" ]]; then
     [[ "$HIKARI_SEED" =~ ^[0-9]+$ ]] || die "HIKARI_SEED must be a non-negative integer"
     SEED_ARGS=(-aesSeed="$HIKARI_SEED")
 fi
+
+# Note: no --sysroot is passed on purpose.  An NDK clang derives its sysroot from
+# its own location — which is what lets the bundled copy work from any path — and
+# forcing one would make host-triple compiles (the driver's default target) pick
+# up Android headers.  `hikari-clang -c foo.c` equals plain NDK clang.
 
 # ------------------------------------------------------------ passthrough? ---
 if [[ "${HIKARI_OBF:-1}" == "0" || "${HIKARI_OBF:-1}" == "off" ]]; then

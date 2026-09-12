@@ -5,11 +5,14 @@ Hikari LLVM 22 pass pipeline (BCF, CFF, substitution, split, string/constant
 encryption, indirect branch, FCO, anti-debug, anti-hook, VMP).
 
 ```bash
-export HIKARI_NDK=/path/to/android-ndk-r29
+# --full archive: nothing else to install, not even an NDK
 export PATH=/path/to/hikari-android-toolchain/bin:$PATH
 
 aarch64-linux-android24-clang -O0 -c foo.c -o foo.o          # obfuscated
 aarch64-linux-android24-clang -O0 foo.c -o foo.arm64
+
+# --slim archive: point at your own NDK first
+export HIKARI_NDK=/path/to/android-ndk-r29
 ```
 
 ## Why a wrapper instead of `-fpass-plugin`
@@ -35,29 +38,36 @@ targets exactly as it does for desktop.
 
 ## Requirements
 
-* An Android NDK (r26+; r29 tested). Only `toolchains/llvm/prebuilt/*` is used.
-* The packaged `llvm/bin/opt` (LLVM 22) — bundled in the release tarball, or set
-  `HIKARI_OPT` to any LLVM 22 `opt`.
-* Linux x86_64, macOS x86_64/arm64 or Windows (Git Bash) hosts.
+* **--full archive:** a Linux x86_64 host, and nothing else — clang, lld, the
+  clang resource directory and the Android sysroot travel inside the archive.
+  (`HIKARI_NDK` is ignored when one is bundled; set it only to override.)
+* **--slim archive:** an Android NDK (r26+; r29 tested) at `HIKARI_NDK`. Only
+  `toolchains/llvm/prebuilt/*` is used.
+* The packaged `llvm/bin/opt` (LLVM 22), or set `HIKARI_OPT` to any LLVM 22 `opt`.
+* macOS/Windows hosts can drive the slim archive with their own NDK; the bundled
+  clang in `--full` is a Linux x86_64 build.
 
 ## Layout
 
 ```
-hikari-android-toolchain/
+hikari-android-toolchain-full/
   bin/hikari-clang                     # the 3-stage driver
   bin/aarch64-linux-android24-clang    # generated: NDK-named target wrappers
   bin/aarch64-linux-android24-clang++  # (plus armv7a / i686 / x86_64, all API levels)
   lib/libHikari.so                     # the pass plugin (LLVM 22)
   llvm/bin/opt                         # LLVM 22 opt that loads the plugin
   llvm/lib/libLLVM.so.22*              # its runtime — nothing to install
+  ndk/toolchains/llvm/prebuilt/*/      # (--full only) clang 21, lld, resource
+                                       # dir, libc++, sysroot for the 4 ABIs
   examples/                            # C samples
+  BUILD-INFO.txt                       # shape, versions, sysroot ABIs
 ```
 
 ## Environment
 
 | Variable | Meaning |
 |---|---|
-| `HIKARI_NDK` | Android NDK directory. Required by the generated wrappers, optional if `HIKARI_CC` is set. |
+| `HIKARI_NDK` | Android NDK directory. Optional in a `--full` package (its own NDK is used), optional if `HIKARI_CC` is set; otherwise required. |
 | `HIKARI_CC` | Explicit clang to use. Use it to obfuscate non-Android targets too. |
 | `HIKARI_PLUGIN` | `libHikari.so`. Defaults to `../lib/`, then the repo's `build/obfuscation/`. |
 | `HIKARI_OPT` | LLVM 22 `opt`. Defaults to `../llvm/bin/opt`, then `opt-22`, then `opt`. |
@@ -145,13 +155,33 @@ HIKARI_PLUGIN=build/obfuscation/libHikari.so \
   ./tools/android-toolchain/smoke-test.sh
 ```
 
-Package a relocatable toolchain:
+Package a relocatable toolchain — `--full` carries an NDK, `--slim` does not:
 
 ```bash
 HIKARI_NDK=$NDK LLVM_PREFIX=/usr/lib/llvm-22 \
 HIKARI_PLUGIN=build/obfuscation/libHikari.so \
-  ./tools/android-toolchain/package-toolchain.sh
-# -> dist/hikari-android-toolchain.tar.gz
+  ./tools/android-toolchain/package-toolchain.sh --full
+  # -> dist/hikari-android-toolchain-full.tar.xz
+
+HIKARI_NDK=$NDK LLVM_PREFIX=/usr/lib/llvm-22 \
+HIKARI_PLUGIN=build/obfuscation/libHikari.so \
+  ./tools/android-toolchain/package-toolchain.sh --slim
+  # -> dist/hikari-android-toolchain-slim.tar.xz
+```
+
+`STRIP=none` keeps the symbols in `opt`/`libLLVM` (bigger archive, readable
+backtraces); `NDK_ABIS` picks which sysroot ABIs `--full` bundles.
+
+Both archives are verified before release. The check unpacks the archive **under
+a different name** (a path baked in at packaging time would fail), runs with a
+scrubbed environment (`env -i`, no `HIKARI_NDK`, no repo) and compiles
+`examples/neg_idx.c` for every ABI the package ships, asserting the object is
+that ABI's ELF, that `vmp_ch_*` handlers are present, and that a `HIKARI_OBF=0`
+build of the same file has none:
+
+```bash
+./tools/android-toolchain/verify-package.sh dist/hikari-android-toolchain-full.tar.xz
+HIKARI_NDK=$NDK ./tools/android-toolchain/verify-package.sh dist/hikari-android-toolchain-slim.tar.xz
 ```
 
 ## Provenance
@@ -162,6 +192,11 @@ The plugin is upstream [PPKunOfficial/Hikari-fix](https://github.com/PPKunOffici
 * `-lwinpthread` no longer leaks out of the Windows branch.
 * The plugin links `libLLVM.so` instead of the static component archives, so the
   host does not abort with *"Option registered more than once"*.
+* The VMP interpreter sign-extends GEP displacements and cast sources from the
+  *source* width. It used to zero-extend a GEP's byte offset (`p - 1` became
+  `p + 0xFFFFFFFF`) and to read the sign bit of `sext` from the destination
+  width, so a virtualized `p[i]` with a negative run-time index produced a wild
+  pointer. `samples/c/neg_idx.c` gates it.
 * The VMP interpreter evaluates unsigned opcodes with zero-extended operands.
   It used to sign-extend both operands of every binary op, which made
   `udiv`/`urem`/`lshr` — and every shift count — observe the operand's high bit

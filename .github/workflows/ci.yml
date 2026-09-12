@@ -89,17 +89,28 @@ jobs:
           export HIKARI_OPT="$LLVM_PREFIX/bin/opt"
           ./tools/android-toolchain/smoke-test.sh
 
-      - name: Package the Android toolchain
+      - name: Package the Android toolchain (full + slim)
         run: |
           set -euo pipefail
           export HIKARI_PLUGIN="$PWD/build/obfuscation/libHikari.so"
-          ./tools/android-toolchain/package-toolchain.sh
+          ./tools/android-toolchain/package-toolchain.sh --full
+          ./tools/android-toolchain/package-toolchain.sh --slim
+
+      # A package that is never unpacked is a package nobody has tested.  The
+      # full archive is verified with no HIKARI_NDK exported at all, which is the
+      # whole point of shipping the NDK inside it.
+      - name: Verify the full package stands alone
+        run: ./tools/android-toolchain/verify-package.sh dist/hikari-android-toolchain-full.tar.*
+
+      - name: Verify the slim package
+        run: HIKARI_NDK="$HIKARI_NDK" ./tools/android-toolchain/verify-package.sh dist/hikari-android-toolchain-slim.tar.*
 
       - uses: actions/upload-artifact@v4
         with:
           name: hikari-android-toolchain
           path: |
-            dist/hikari-android-toolchain.tar.gz
+            dist/hikari-android-toolchain-full.tar.*
+            dist/hikari-android-toolchain-slim.tar.*
             build/obfuscation/libHikari.so
           if-no-files-found: error
 
@@ -125,6 +136,7 @@ jobs:
             gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" --notes "Automated build for $GITHUB_REF_NAME"
           gh release upload "$GITHUB_REF_NAME" \
-            dist/hikari-android-toolchain.tar.gz \
+            dist/hikari-android-toolchain-full.tar.* \
+            dist/hikari-android-toolchain-slim.tar.* \
             build/obfuscation/libHikari.so \
             -R "$GITHUB_REPOSITORY" --clobber
