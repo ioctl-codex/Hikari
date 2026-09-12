@@ -477,7 +477,11 @@ static bool translateInst(VMPContext &C, Instruction *I) {
       emitU64(C.Code, 0); // elem_size unused
       emitPackedVar(C.Code, kPointerSize, Res);
       emitOperand(C, GEP->getPointerOperand());
-      emitPackedConst(C.Code, kPointerSize, ConstOff.getZExtValue());
+      // A byte offset is signed.  ConstOff is only index-sized (32-bit on
+      // 32-bit targets), so zero-extending it to pointer width would turn
+      // `p - 1` into `p + 0xFFFFFFFF`.
+      emitPackedConst(C.Code, kPointerSize,
+                      static_cast<uint64_t>(ConstOff.getSExtValue()));
       return true;
     }
 
@@ -1420,11 +1424,17 @@ static bool buildInterpreter(Function *Host, VMPContext &V) {
     AllocaInst *SzT = B.CreateAlloca(I8);
     Value *ResOff = callReadVar(B, SzT);
     Value *Base = callEval(B);
-    Value *Idx = callEval(B);
-    // kind==0: base+idx; kind==1: base+idx*elem
-    Value *Scaled = B.CreateMul(Idx, ElemSz);
-    Value *Off =
-        B.CreateSelect(B.CreateICmpEQ(Kind, ConstantInt::get(I8, 0)), Idx, Scaled);
+    AllocaInst *DispSz = B.CreateAlloca(I8);
+    Value *DispRaw = callEval(B, DispSz);
+    // GEP indices are signed, and the field is a raw byte offset for kind 0, so
+    // the displacement is sign-extended from its own width.  Reading it
+    // zero-extended turned a dynamic `p[-1]` into `p[0xFFFFFFFF]`.
+    Value *Disp =
+        sextToI64(B, I8, I64, DispRaw, B.CreateLoad(I8, DispSz));
+    // kind==0: base+disp; kind==1: base+disp*elem
+    Value *Scaled = B.CreateMul(Disp, ElemSz);
+    Value *Off = B.CreateSelect(
+        B.CreateICmpEQ(Kind, ConstantInt::get(I8, 0)), Disp, Scaled);
     Value *Res = B.CreateAdd(Base, Off);
     irStoreBytes(B, I8, I64, Data, ResOff, Res,
                  ConstantInt::get(I8, kPointerSize));
@@ -1446,7 +1456,9 @@ static bool buildInterpreter(Function *Host, VMPContext &V) {
     AllocaInst *SzT = B.CreateAlloca(I8);
     Value *ResOff = callReadVar(B, SzT);
     Value *DstSz = B.CreateLoad(I8, SzT);
-    Value *Src = callEval(B);
+    AllocaInst *SrcSzT = B.CreateAlloca(I8);
+    Value *Src = callEval(B, SrcSzT);
+    Value *SrcSz = B.CreateLoad(I8, SrcSzT);
     auto *SextBB = BasicBlock::Create(Ctx, "cast_sext", Host);
     auto *NormBB = BasicBlock::Create(Ctx, "cast_norm", Host);
     auto *Join = BasicBlock::Create(Ctx, "cast_join", Host);
@@ -1454,23 +1466,14 @@ static bool buildInterpreter(Function *Host, VMPContext &V) {
     B.CreateCondBr(B.CreateICmpEQ(Kind, ConstantInt::get(I8, CAST_SEXT)), SextBB,
                    NormBB);
     IRBuilder<> CS(SextBB);
-    Value *Masked = maskToSize(CS, I8, I64, Src, DstSz);
-    Value *Bits =
-        CS.CreateShl(CS.CreateZExt(DstSz, I64), ConstantInt::get(I64, 3));
-    Value *Full = CS.CreateICmpUGE(DstSz, ConstantInt::get(I8, 8));
-    Value *SafeBits =
-        CS.CreateSelect(Full, ConstantInt::get(I64, 1), Bits);
-    Value *SignBit = CS.CreateShl(
-        ConstantInt::get(I64, 1),
-        CS.CreateSub(SafeBits, ConstantInt::get(I64, 1)));
-    Value *Neg = CS.CreateICmpNE(CS.CreateAnd(Masked, SignBit),
-                                 ConstantInt::get(I64, 0));
-    Value *Mask = CS.CreateSub(CS.CreateShl(ConstantInt::get(I64, 1), SafeBits),
-                               ConstantInt::get(I64, 1));
-    Value *Sexted =
-        CS.CreateSelect(Neg, CS.CreateOr(Masked, CS.CreateNot(Mask)), Masked);
-    CS.CreateStore(CS.CreateSelect(Full, Src, Sexted), RA);
+    // Sign extension works from the *source* width: in `sext i32 -> i64` the
+    // sign bit is at 31, not 63.  Keying it off the destination width left
+    // `(int64_t)(int32_t)-1` as 0x00000000FFFFFFFF, which then became a wild
+    // pointer in the very common `p[i - 1]` shape.
+    CS.CreateStore(sextToI64(CS, I8, I64, Src, SrcSz), RA);
     CS.CreateBr(Join);
+    // trunc / zext / bitcast / ptrtoint / inttoptr all keep the low DstSz bytes
+    // of the source and zero the rest; the store below drops the excess.
     IRBuilder<> CN(NormBB);
     CN.CreateStore(maskToSize(CN, I8, I64, Src, DstSz), RA);
     CN.CreateBr(Join);

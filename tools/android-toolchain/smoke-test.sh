@@ -103,6 +103,10 @@ run_set default  'hikari(enable-bcfobf,enable-cffobf,enable-subobf,enable-splito
 run_set vmp      'hikari(enable-vmp,enable-cffobf)' vmp_add.c
 run_set allobf   'hikari(enable-allobf)'            hello.c
 run_set constenc 'hikari(enable-constenc,enable-subobf,enable-splitobf)' vmp_complex.c
+# Signed pointer arithmetic: negative, run-time GEP indices (`p[i - 1]`) go
+# through `sext i32 -> i64` and a signed GEP displacement in the VM.
+run_set signedidx     'hikari(enable-bcfobf,enable-cffobf,enable-subobf,enable-splitobf)' neg_idx.c
+run_set signedidx_vmp 'hikari(enable-vmp,enable-cffobf,enable-subobf)'                   neg_idx.c
 
 # ------------------------------------------------------------ android part ---
 echo
@@ -123,7 +127,7 @@ else
         [[ -x "$readelf" ]] || readelf=readelf
         [[ -x "$nm" ]] || nm=nm
 
-        for s in vmp_add.c hello.c vmp_complex.c; do
+        for s in vmp_add.c hello.c vmp_complex.c neg_idx.c; do
             if ! HIKARI_PASSES='hikari(enable-vmp,enable-cffobf)' HIKARI_CC="$cc" \
                  "$W" -c "$HIKARI_ROOT/samples/c/$s" -o "$WORK/${s%.c}.o" >/dev/null 2>&1; then
                 bad "$s: android compile failed"; continue
