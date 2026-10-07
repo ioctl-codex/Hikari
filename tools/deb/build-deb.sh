@@ -174,11 +174,19 @@ cp "$HIKARI_ROOT/README.md" "$STAGE/usr/share/doc/$NAME/README.md"
 cp "$SELF_DIR/README.md" "$STAGE/usr/share/doc/$NAME/deb.md"
 [[ -f "$HIKARI_ROOT/LICENSE" ]] && cp "$HIKARI_ROOT/LICENSE" "$STAGE/usr/share/doc/$NAME/copyright"
 
+# `opt --version` is two lines -- "<distributor> LLVM version X.Y.Z" and a
+# build-kind note -- so the version is the first, and taking the second recorded
+# "Optimized build." instead.  Parse the version out, and fall back to the first
+# line rather than to a blank.
+opt_version="$("$LLVM_PREFIX/bin/opt" --version 2>/dev/null || true)"
+llvm_version="$(printf '%s\n' "$opt_version" | sed -n 's/.*LLVM version \([^ ]*\).*/\1/p')"
+[[ -n "$llvm_version" ]] || llvm_version="$(printf '%s\n' "$opt_version" | sed -n '1p')"
+
 {
     echo "shape: native .deb ($ARCH)"
     echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "llvm-prefix: $LLVM_PREFIX"
-    echo "llvm-version: $("$LLVM_PREFIX/bin/opt" --version 2>/dev/null | head -2 | tail -1)"
+    echo "llvm-version: ${llvm_version:-unknown}"
     echo "plugin: $(basename "$HIKARI_PLUGIN")"
     [[ -n "${GIT_COMMIT_HASH:-}" ]] && echo "commit: $GIT_COMMIT_HASH"
 } > "$STAGE/usr/lib/hikari/BUILD-INFO.txt"
