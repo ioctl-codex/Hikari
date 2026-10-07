@@ -40,6 +40,33 @@ the `$PREFIX/bin/hikari-clang` symlink is all that has to be on `PATH`. Every
 knob from the main README applies: `HIKARI_PASSES`, `HIKARI_SEED`,
 `HIKARI_OPT_LEVEL`, `HIKARI_VERBOSE`, `HIKARI_OBF`.
 
+## Building it off the device (cross-compile)
+
+When there is no phone to hand — CI, or a packager's machine —
+`build-cross.sh` does the same build with the NDK, against the headers and the
+`libLLVM.so` taken out of Termux's own packages:
+
+```bash
+sudo ./tools/termux/build-cross.sh --package
+# -> dist/hikari_1.0.0_aarch64.deb
+```
+
+It needs root for one reason, and it is the whole trick: Termux's LLVM cmake
+files bake in absolute paths — `LLVMConfig.cmake` says the include directory is
+`/data/data/com.termux/files/usr/include` — so the packages are unpacked *at
+that path* (`dpkg-deb -x` puts a Termux package exactly where it declares) and
+every path LLVM names simply resolves, with nothing patched and no `-I` flags
+papering over it. The versions come from Termux's own package index and are
+everified against the sha256 it publishes, so this keeps working when Termux
+bumps LLVM.
+
+Because there is no device, this build is checked by *reconstruction* rather
+than by execution: the plugin must be an aarch64 object, must declare the
+`libLLVM.so` soname Termux's `libllvm` provides, must not carry a second static
+LLVM or any OpenMP, and every LLVM symbol it leaves undefined must be exported
+by that exact `libLLVM.so`. That is as far as it goes without hardware — which
+is what the on-device build above is for.
+
 ## Packaging it as a `.deb`
 
 ```bash
