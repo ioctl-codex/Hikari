@@ -199,6 +199,39 @@ build of the same file has none:
 HIKARI_NDK=$NDK ./tools/android-toolchain/verify-package.sh dist/hikari-android-toolchain-slim.tar.xz
 ```
 
+## Handing IR from LLVM 22 back to clang 21
+
+Text IR hides most of the version gap, but not all of it, and real C++ findsthe rest. Every item below was measured, not guessed, on a 3700-line C++17
+translation unit (exceptions, RTTI, libc++, Android system headers) compiled
+for `aarch64-linux-android21` with NDK r29's clang 21.0.0 obfuscating through
+LLVM 22.1.8:
+
+* **Bitcode out of stage 2 is not readable by stage 3.** LLVM's bitcode reader
+  goes one way, and stage 2 is the newer tool; a module carrying debug info dies
+  with `error: Invalid record`, and even without it the writer emits attribute
+  kinds the older reader rejects (`Unknown attribute kind (105)`). Both are
+  avoided by keeping every hand-off textual — which is why stage 1 emits `.ll`
+  too.
+* **Two attribute spellings still have to be stripped.** `target_memN: none`
+  (a location LLVM 21 has never heard of) and `nocreateundeforpoison` (a name
+  added after LLVM 21) both fail the LLVM 21 parser with `unterminated attribute
+  group`. Note that attributes inside a group are separated by **spaces**, so a
+  pattern anchored on a leading comma misses every token that is not first.
+* **`-O2` in stage 3 crashes clang 21.** The obfuscated module can contain IR
+  that LLVM 21's own passes do not survive; `sroa<modify-cfg>` died with a null
+  deref on an inline `android::detail::String8(char const*)` that had been faked
+  out of a system header. Stage 3 therefore always codegens at `-O0` — nothing
+  is lost, because stage 1 already ran the requested `-O` level.
+* **`enable-indibran` only works for single-translation-unit links.** The pass
+  records the address of each function it rewrites in
+  `.data..LIndirectBranchingGlobalTable`, including weak/COMDAT inline functions
+  from the C++ standard library. Linking two obfuscated objects then fails:
+  `ld.lld` discards the duplicate COMDAT (the prevailing copy lives in the other
+  object) while the table still relocates into it —
+  `relocation refers to a discarded section`. Use `enable-cffobf` instead, or
+  obfuscate a single TU, or keep the pass for a final link that only ever sees
+  one obfuscated object.
+
 ## Provenance
 
 The plugin is upstream [PPKunOfficial/Hikari-fix](https://github.com/PPKunOfficial/Hikari-fix)

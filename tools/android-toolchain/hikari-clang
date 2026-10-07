@@ -225,6 +225,21 @@ for f in "${FWD[@]}"; do
 done
 [[ "$DEP_WANTS" == "1" ]] && STAGE1_EXTRA+=("-O0")
 
+# Stage 3 only has to *print* the mangled IR, so never let clang 21 re-run its
+# optimizer over it.  A module written by LLVM 22 can contain IR that LLVM 21's
+# passes do not survive, and the failure is a hard crash, not a diagnostic:
+#
+#   clang++ --target=aarch64-linux-android21 -O2 -c obf.ll
+#   -> PLEASE submit a bug report ...
+#      Running pass "sroa<modify-cfg>" on function "_ZN7android6detail7String8C2EPKc"
+#      (null deref)   [Android NDK r29 clang 21.0.0, LLVM 22.1.8 opt]
+#
+# -O0 skips those passes and still lowers/codegens the module correctly, and no
+# optimization is lost: the source was already optimized in stage 1, which is
+# where the -O level belongs.  Appended *after* the forwarded flags so that the
+# caller's own -O2 cannot win.
+STAGE3_EXTRA=(-O0)
+
 # Packaged toolchains ship LLVM's runtime next to opt; point the loader at it so
 # the archive works on a machine without libLLVM.so.22 installed.
 for _l in "$SELF_DIR/../llvm/lib" "$SELF_DIR/../lib/llvm/lib"; do
@@ -244,8 +259,25 @@ unset _l
 # are rewritten (never string data or instruction text), and a clause claiming a
 # real effect is deliberately left alone so the build fails loudly instead of
 # silently weakening an attribute.
+# LLVM 22 writes attribute spellings the LLVM 21 parser does not know.  Two
+# have been seen on real C++ (exceptions + RTTI, system headers):
+#
+#   target_memN: none      -> memory(...) clause with a location LLVM 21 lacks
+#   nocreateundeforpoison  -> attribute name added after LLVM 21
+#
+# Both surface as `error: unterminated attribute group` pointing at the token.
+# Dropping them is not a semantic change: `target_memN: none` restates that the
+# location is untouched, and `nocreateundeforpoison` only permits an optimization
+# that already happened in stage 1.  A clause claiming a *real* effect is left
+# alone so a genuine mismatch fails loudly instead of being silently weakened.
+#
+# Attributes inside a group are space separated, so the separator cannot be
+# assumed to be a comma -- the previous comma-only pattern missed a token that
+# was not the first in the group.
+UNKNOWN_ATTRS='[ ,]+(target_mem[0-9]+: none|nocreateundeforpoison)\b'
+
 normalize_attrs() { # <file.ll>
-    sed -i -E '/^attributes #[0-9]+ = \{/ s/, *target_mem[0-9]+: none//g' "$1"
+    sed -i -E "/^attributes #[0-9]+ = \{/ s/${UNKNOWN_ATTRS}//g" "$1"
 }
 
 # Emits text IR: see the note at the top of this file for why bitcode and text
@@ -301,7 +333,7 @@ if [[ "$MODE" == "compile" ]]; then
     # (the object landed in ./s0.o).
     if [[ -n "$OUTPUT" && ${#OBF_IR[@]} -eq 1 ]]; then
         log "object $OUTPUT"
-        exec "$CLANG" "${FWD[@]}" -c "${OBF_IR[0]}" -o "$OUTPUT"
+        exec "$CLANG" "${FWD[@]}" "${STAGE3_EXTRA[@]}" -c "${OBF_IR[0]}" -o "$OUTPUT"
     fi
     [[ -n "$OUTPUT" ]] && die "-c with several translation units cannot use -o"
     # Several sources with -c: clang drops one .o per source into the cwd, named
@@ -312,13 +344,13 @@ if [[ "$MODE" == "compile" ]]; then
         out="$(basename "${IR_SRC[$idx]:-s$idx}")"
         out="${out%.*}.o"
         log "object $out"
-        "$CLANG" "${FWD[@]}" -c "${OBF_IR[$idx]}" -o "$out"
+        "$CLANG" "${FWD[@]}" "${STAGE3_EXTRA[@]}" -c "${OBF_IR[$idx]}" -o "$out"
     done
     exit 0
 fi
 
 # Compile + link in a single invocation.
-LINK=("${FWD[@]}" "${OBF_IR[@]}")
+LINK=("${FWD[@]}" "${STAGE3_EXTRA[@]}" "${OBF_IR[@]}")
 [[ ${#OTHER_INPUTS[@]} -gt 0 ]] && LINK+=("${OTHER_INPUTS[@]}")
 [[ -n "$OUTPUT" ]] && LINK+=(-o "$OUTPUT")
 exec "$CLANG" "${LINK[@]}"
