@@ -67,24 +67,16 @@ and newer and on Debian 12 and newer.
 ## Architectures
 
 The package architecture is whatever architecture the LLVM it wraps is, so it is
-built once per target:
+built once per target. The release ships `amd64` and `arm64`; the arm64 one is
+built in an arm64 chroot (an installed `LLVMExports.cmake` bakes in absolute
+paths, and the plugin has to link against the same `libLLVM` the host `opt`
+loads, so a cross-compile would mean patching one side or the other).
 
-| Target | `DEB_ARCH` | Notes |
-|---|---|---|
-| Ubuntu / Debian x86_64 | `amd64` | the CI artifact |
-| Ubuntu / Debian arm64 | `arm64` | needs an aarch64 `llvm-22` + `opt` to wrap |
-| Termux (Android, aarch64) | `aarch64` | Termux packages are a different shape — see below |
-
-### Termux
-
-Termux is not a second name for arm64 Debian: its packages install under
-`$PREFIX` (`/data/data/com.termux/files/usr`) and its `llvm` package is **LLVM
-21.1.8**, not 22. A plugin built for LLVM 22 cannot be loaded by Termux's `opt`,
-so a Termux package has to be built against Termux's own LLVM — which in turn
-means building the plugin against LLVM 21 (`-DLT_LLVM_INSTALL_DIR` pointing at a
-21 install passes the gates; the CMake version check allows 21 on purpose) and
-driving it from `$PREFIX/bin/opt`. On a Termux device that is a local build,
-because Termux ships no LLVM development headers to cross-compile against.
+Termux is a third shape and has its own tooling — see
+[`tools/termux/README.md`](../termux/README.md). It is **not** the arm64 package
+above: its packages install under `$PREFIX`
+(`/data/data/com.termux/files/usr`), and its `llvm` package is **LLVM 21.1.8**,
+not 22, so a plugin built for LLVM 22 cannot be loaded by Termux's `opt` at all.
 
 ## Dependencies at build time
 

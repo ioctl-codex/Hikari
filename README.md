@@ -1,32 +1,67 @@
 # Hikari-LLVM22
 
-Out-of-tree LLVM 混淆 Pass 插件，可在 **opt / rustc nightly** 上动态加载，无需重编 LLVM 或 rustc。
+An out-of-tree LLVM 22 obfuscation pass plugin that loads dynamically into
+**`opt` or `rustc` nightly** — without rebuilding LLVM or rustc.
 
-提取自 [Hikari-LLVM15](https://github.com/61bcdefg/Hikari-LLVM15) By 61bcdefg。
+Derived from [Hikari-LLVM15](https://github.com/61bcdefg/Hikari-LLVM15) by 61bcdefg.
 
-> **平台说明**：目前仅在 **macOS arm64** 上编译并验证过（C + Rust）。其他平台未完整测试。  
-> 若混淆后运行异常，可先将优化级别设为 **`-C opt-level=0`**（Rust）或 **`-O0`**（C）。
+> **Platform note**: verified on **macOS arm64** (C and Rust) and on **Linux
+> x86_64** (C, AArch64 cross-compilation, `opt` and the Debian package). Other
+> platforms have not been tested end to end. If obfuscated code misbehaves,
+> first drop the optimization level to **`-C opt-level=0`** (Rust) or **`-O0`**
+> (C) — Hikari targets `-O0` IR.
 
-## 版本对齐
+## Prebuilt packages
 
-| 组件 | 版本 |
-|------|------|
-| 本插件目标 LLVM | **22** |
-| Homebrew `llvm` | 22.1.x（`brew install llvm`） |
-| rustc stable | 1.97.x（LLVM 22） |
-| rustc nightly | 1.99.x-nightly（LLVM 22） |
+Every release carries the plugin and the host that loads it, so nothing has to
+be assembled by hand. See the [releases page](../../releases) for the current
+checksums.
 
-**rustc 的 LLVM 主版本必须与编译本插件时使用的 LLVM 一致**，否则 `-Zllvm-plugins` 可能无法加载。
+| Target | Artifact | What it is |
+|---|---|---|
+| Ubuntu / Debian x86_64 | `hikari_<version>_amd64.deb` | the plugin, an LLVM 22 `opt` with its `libLLVM`, and `hikari-clang` on `PATH` |
+| Ubuntu / Debian arm64 | `hikari_<version>_arm64.deb` | the same, for `aarch64` hosts |
+| Android, no NDK needed | `hikari-android-toolchain-full.tar.xz` | the plugin plus a bundled NDK: clang, lld, sysroot |
+| Android, with your own NDK | `hikari-android-toolchain-slim.tar.xz` | the plugin, the LLVM 22 `opt` and the per-ABI wrappers |
+| Termux (Android, aarch64) | `hikari_<version>_aarch64.deb` | the plugin built against Termux's own LLVM 21.1.8 — see [`tools/termux/README.md`](tools/termux/README.md) |
+| Any LLVM 22 host | `libHikari.so` | the plugin on its own |
 
-## 编译
+```bash
+sudo dpkg -i hikari_1.0.0_amd64.deb
+hikari-clang -O0 hello.c -o hello            # obfuscated
+HIKARI_OBF=0 hikari-clang -O0 hello.c -o hi  # one clean build, to compare
+```
 
-### 依赖
+Packaging details: [`tools/deb/README.md`](tools/deb/README.md) and
+[`tools/android-toolchain/README.md`](tools/android-toolchain/README.md).
 
-- CMake ≥ 3.20、Ninja
-- LLVM 22 开发包（含 headers / cmake 配置）
-- macOS：`brew install llvm ninja cmake`
+## Version alignment
 
-### 构建
+| Component | Version |
+|---|---|
+| LLVM this plugin targets | **22** |
+| Homebrew `llvm` | 22.1.x (`brew install llvm`) |
+| `rustc` stable | 1.97.x (LLVM 22) |
+| `rustc` nightly | 1.99.x-nightly (LLVM 22) |
+
+**rustc's LLVM major version has to match the LLVM this plugin was built
+against**, or `-Zllvm-plugins` may fail to load it.
+
+The build accepts LLVM **21** as well as 22. 21 is not a target of its own — it
+is there because Termux ships 21.1.8 and nothing newer, and the only way to run
+this on a phone is against the LLVM the phone has. The plugin builds against 21
+and passes `smoke-test.sh` there (14/14, seeded sweep included). Anything older
+is refused at configure time.
+
+## Building
+
+### Dependencies
+
+- CMake ≥ 3.20, Ninja
+- An LLVM 22 development package (headers and cmake config)
+- macOS: `brew install llvm ninja cmake`
+
+### Build
 
 ```bash
 cmake -G "Ninja" -S . -B ./build \
@@ -37,16 +72,17 @@ cmake -G "Ninja" -S . -B ./build \
 cmake --build ./build
 ```
 
-将 `LT_LLVM_INSTALL_DIR` 换成你的 LLVM 22 安装前缀（CMake 默认值同样是 `/opt/homebrew/opt/llvm`）。
+Replace `LT_LLVM_INSTALL_DIR` with your LLVM 22 prefix (the CMake default is
+`/opt/homebrew/opt/llvm`; on Debian and Ubuntu it is `/usr/lib/llvm-22`).
 
-| 平台 | 产物路径 |
-|------|----------|
+| Platform | Artifact |
+|---|---|
 | macOS | `build/obfuscation/libHikari.dylib` |
 | Linux | `build/obfuscation/libHikari.so` |
 
-## 使用
+## Usage
 
-### Rust（nightly 动态加载）
+### Rust (nightly, dynamic loading)
 
 ```bash
 rustup toolchain install nightly
@@ -55,16 +91,16 @@ cargo new helloworld --bin
 cd helloworld
 cargo +nightly rustc --release -- \
   -C opt-level=0 \
-  -Zllvm-plugins="/绝对路径/libHikari.dylib" \
+  -Zllvm-plugins="/absolute/path/libHikari.dylib" \
   -Cpasses="hikari(enable-bcfobf,enable-cffobf,enable-strcry)"
 ```
 
-### opt（C/C++ 等）
+### opt (C/C++, and anything else with LLVM IR)
 
 ```bash
 clang -O0 -emit-llvm -c input.c -o input.bc
 
-opt -load-pass-plugin="/绝对路径/libHikari.dylib" \
+opt -load-pass-plugin="/absolute/path/libHikari.dylib" \
     --passes="hikari(enable-bcfobf,enable-cffobf,enable-strcry)" \
     input.bc -o output.bc
 
@@ -72,98 +108,124 @@ llc -filetype=obj output.bc -o output.o
 clang output.o -o output
 ```
 
-流水线名字必须是 **`hikari(...)`**，内部再写具体开关。
+The pipeline name must be **`hikari(...)`**, with the individual switches inside.
 
-## 开关一览
+The packaged `hikari-clang` driver runs those three stages for you and only
+passes text IR between them; see
+[`tools/android-toolchain/README.md`](tools/android-toolchain/README.md) for why
+that is what makes an older clang able to feed an LLVM 22 plugin.
 
-| 开关 | 说明 |
-|------|------|
-| `hikari(...)` | 启用调度（**必须**作为外层 pass 名） |
-| `enable-allobf` | 打开大部分混淆（见下方说明） |
-| `enable-bcfobf` | 虚假控制流 |
-| `enable-cffobf` | 控制流平坦化 |
-| `enable-subobf` | 指令替换 |
-| `enable-splitobf` | 基本块分割 |
-| `enable-strcry` | 字符串加密（C 字符串 / Rust 字符串数据） |
-| `enable-constenc` | 常量加密 |
-| `enable-indibran` | 间接跳转 |
-| `enable-fco` | 函数调用混淆（`dlopen`/`dlsym` 风格） |
-| `enable-funcwra` | 函数包装（已知不稳定） |
-| `enable-antihook` | AntiHook（AArch64 inline / antirebind） |
+## Switches
+
+| Switch | Meaning |
+|---|---|
+| `hikari(...)` | enables the scheduler (**required** as the outer pass name) |
+| `enable-allobf` | turns on most passes (see below) |
+| `enable-bcfobf` | bogus control flow |
+| `enable-cffobf` | control-flow flattening |
+| `enable-subobf` | instruction substitution |
+| `enable-splitobf` | basic-block splitting |
+| `enable-strcry` | string encryption (C strings / Rust string data) |
+| `enable-constenc` | constant encryption |
+| `enable-indibran` | indirect branches |
+| `enable-fco` | function-call obfuscation (`dlopen`/`dlsym` style) |
+| `enable-funcwra` | function wrapping (known unstable) |
+| `enable-antihook` | AntiHook (AArch64 inline / antirebind) |
 | `enable-adb` | AntiDebugging |
-| `enable-vmp` | **IR 虚拟化（VMP）**：将函数译为自定义 bytecode + 解释器 |
+| `enable-vmp` | **IR virtualization (VMP)**: translate functions into a private bytecode plus an interpreter |
 
-`enable-allobf` 会打开：`bcf`、`cff`、`sub`、`split`、`strcry`、`indibran`、`fco`、`funcwra`。  
-**不会**打开：`constenc`、`antihook`、`adb`、`vmp`（需单独指定）。
+`enable-allobf` turns on: `bcf`, `cff`, `sub`, `split`, `strcry`, `indibran`,
+`fco`, `funcwra`.
+It does **not** turn on: `constenc`, `antihook`, `adb`, `vmp` — ask for those
+explicitly.
 
-也可用环境变量（非 `hikari()` 参数时）：`BCFOBF`、`CFFOBF`、`SUBOBF`、`SPLITOBF`、`STRCRY`、`INDIBRAN`、`FCO`、`FUNCWRA`、`ANTIHOOK`、`ADB`、`CONSTENC`、`ALLOBF`、`VMP`。
+Environment variables work as an alternative to the `hikari()` arguments:
+`BCFOBF`, `CFFOBF`, `SUBOBF`, `SPLITOBF`, `STRCRY`, `INDIBRAN`, `FCO`,
+`FUNCWRA`, `ANTIHOOK`, `ADB`, `CONSTENC`, `ALLOBF`, `VMP`.
 
-### VMP（`enable-vmp`）
+### VMP (`enable-vmp`)
 
-IR 级虚拟机保护：将函数译为自定义 bytecode + 栈上可重入解释器。
+IR-level virtual machine protection: functions are translated into a private
+bytecode plus a re-entrant interpreter that lives on the stack.
 
-| 方式 | 说明 |
-|------|------|
-| 函数标注 | `__attribute__((annotate("vmp")))`；排除 `novmp` |
-| 管线 | `hikari()` 仅处理标注；`hikari(enable-vmp)` 尝试模块内所有可译函数 |
-| 环境变量 | `VMP=1` 等同 `enable-vmp` |
-| 加密 | 默认开启 L1 双 seed（opcode + 整 BB）；`VMPNOENC=1` / 标注 `novmpenc` 关闭；`VMPENCRYPT=1` / 标注 `vmpenc` 强制开 |
-| 与平坦化结合 | `hikari(enable-vmp,enable-cffobf)`：**先 VMP、再 CFF**（自动跳过 VMP 目标上的前置 CFF，避免「平坦化后再整段虚拟化」体积爆炸） |
-| 加固 | `VMPHARDEN=1` / 标注 `vmpharden`：等同对虚拟化后函数+辅助函数跑 CFF（无 enable-cffobf 时也可单独开） |
+| Mechanism | Meaning |
+|---|---|
+| Function annotation | `__attribute__((annotate("vmp")))`; exclude with `novmp` |
+| Pipeline | `hikari()` processes only annotated functions; `hikari(enable-vmp)` tries every translatable function in the module |
+| Environment | `VMP=1` is the same as `enable-vmp` |
+| Encryption | on by default, L1 dual-seed (opcode + whole basic blocks); `VMPNOENC=1` or the `novmpenc` annotation turns it off; `VMPENCRYPT=1` or the `vmpenc` annotation forces it on |
+| Combined with flattening | `hikari(enable-vmp,enable-cffobf)`: **VMP first, then CFF** (a preceding CFF on VMP targets is skipped automatically, to avoid the size blowup of flattening something that is then virtualized wholesale) |
+| Hardening | `VMPHARDEN=1` or the `vmpharden` annotation: equivalent to running CFF over the virtualized function and its helpers (usable on its own, without `enable-cffobf`) |
 
-**支持的 IR（-O0 友好）**
+**Supported IR (friendly to `-O0`)**
 
-- 内存：`alloca` / `load` / `store`（alloca 结果为真实 VA，可外传指针）
-- 整数：binop / icmp（含有符号）/ cast / select
-- 控制流：`br` / `ret` / `unreachable`
-- `gep`：常量偏移、单索引、常见 `[0, i]` 数组形态
-- `call`：直接/间接，经 `vmp_ch_*` handler 出站
-- 全局变量 / 函数指针：启动器写入 data 槽
+- Memory: `alloca` / `load` / `store` (an alloca's result is a real VA, so
+  pointers can be handed out)
+- Integers: binop / icmp (signed and unsigned) / cast / select
+- Control flow: `br` / `ret` / `unreachable`
+- `gep`: constant offsets, a single index, the common `[0, i]` array form
+- `call`: direct and indirect, leaving through `vmp_ch_*` handlers
+- Globals / function pointers: written into data slots by the launcher
 
-**运行时模型**
+**Runtime model**
 
-- 每调用独立：`data` / `ip` / 解密状态均在栈上 → **默认可重入**（含递归 VMP 函数）
-- 字节码：`@vmp_code_<fn>`；BB seed 表：`@vmp_seeds_<fn>`
-- 不支持则 **整函数 skip**（可观测 `[VMP] skip/translate fail` 日志），不损坏 Module
+- Per call: `data`, `ip` and the decryption state all live on the stack, so VMP
+  functions are **re-entrant by default**, recursion included
+- Bytecode: `@vmp_code_<fn>`; basic-block seed table: `@vmp_seeds_<fn>`
+- Anything it cannot translate is **skipped wholesale** (visible as a
+  `[VMP] skip/translate fail` log) rather than corrupting the module
 
-**明确不支持（hard-fail skip）**
+**Explicitly unsupported (hard-fail skip)**
 
-- 变参、异常/EH、浮点、向量、复杂多动态索引 GEP
+- varargs, exceptions/EH, floating point, vectors, complex multi-dynamic-index
+  GEPs
 
-建议目标函数 `-O0` / `optnone`。验收：`./samples/run_vmp.sh`。
+Target functions should be `-O0` / `optnone`. Acceptance test:
+`./samples/run_vmp.sh`.
 
-**完整文档**（架构 / 字节码 / 开关 / 与 CFF 混合 / 排障）：[`docs/VMP.md`](docs/VMP.md)。
+**Full documentation** (architecture / bytecode / switches / mixing with CFF /
+troubleshooting): [`docs/VMP.md`](docs/VMP.md).
 
-### 已移除
+### Removed
 
-- **Objective-C** 相关能力已全部去掉（无测试环境）：
+- **Objective-C support is gone entirely** (there was no test environment):
   - `enable-acdobf` / AntiClassDump
-  - FCO 的 class/sel 改写
-  - strcry 的 CFString / NSString
-  - antihook 的 ObjC runtime 检测
+  - FCO's class/sel rewriting
+  - strcry's CFString / NSString
+  - antihook's ObjC runtime checks
 
-本仓库面向 **C / Rust / 普通 LLVM IR**。
+This repository targets **C / Rust / ordinary LLVM IR**.
 
-## 示例
+## Examples
 
-仓库内带对比脚本：
+The repository ships comparison scripts:
 
 ```bash
-# 先按上文编译插件，再：
+# build the plugin first (see above), then:
 ./samples/run_demo.sh
-./samples/run_vmp.sh    # VMP 正确性验收
+./samples/run_vmp.sh    # VMP correctness gate
 ```
 
-详见 [`samples/README.md`](samples/README.md)。
+See [`samples/README.md`](samples/README.md).
 
-## 注意
+## Notes
 
-1. **动态加载**需要 host（`opt` / `rustc`）与插件 LLVM **主版本一致**。
-2. `enable-strcry` 在部分 Rust 代码上仍可能不稳；出问题可先关掉 strcry 或降 opt level。
-3. `enable-funcwra` 历史注释为 Broken，不建议默认开启。
-4. 控制流类 pass（尤其 `indibran` + `bcf`）会明显增大体积与编译时间。
+1. **Dynamic loading** requires the host (`opt` / `rustc`) and the plugin to
+   share the LLVM major version.
+2. `enable-strcry` can still be unstable on some Rust code; turn strcry off or
+   lower the optimization level if it misbehaves.
+3. `enable-funcwra` is historically marked Broken and should not be enabled by
+   default.
+4. Control-flow passes (especially `indibran` + `bcf`) noticeably increase
+   binary size and compile time.
 
-## 感谢
+## CI
 
-- [Hikari-LLVM15](https://github.com/61bcdefg/Hikari-LLVM15) By 61bcdefg
-- [ollvm-rust](https://github.com/0xlane/ollvm-rust) By 0xlane
+Every gate lives in a script, so a human, a local runner and a hosted runner all
+run the same thing — the workflows only decide *where*. See
+[`docs/CI.md`](docs/CI.md).
+
+## Thanks
+
+- [Hikari-LLVM15](https://github.com/61bcdefg/Hikari-LLVM15) by 61bcdefg
+- [ollvm-rust](https://github.com/0xlane/ollvm-rust) by 0xlane
