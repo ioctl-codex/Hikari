@@ -64,13 +64,41 @@ in turn pulls `libicu`, which is why it is named rather than assumed. The
 package is built on glibc 2.35 (Ubuntu 22.04), so it installs on Ubuntu 22.04
 and newer and on Debian 12 and newer.
 
+## Verifying a package
+
+```bash
+sudo ./tools/deb/verify-deb.sh dist/hikari_1.0.0_amd64.deb
+```
+
+Installs the package, drives the samples through `/usr/bin/hikari-clang` and
+compares each obfuscated program's output against a clean build, then removes
+the package and fails if anything was left behind. It is the same check CI runs,
+and the reason to run it is that a package nobody has unpacked is a package
+nobody has tested.
+
 ## Architectures
 
 The package architecture is whatever architecture the LLVM it wraps is, so it is
-built once per target. The release ships `amd64` and `arm64`; the arm64 one is
-built in an arm64 chroot (an installed `LLVMExports.cmake` bakes in absolute
-paths, and the plugin has to link against the same `libLLVM` the host `opt`
-loads, so a cross-compile would mean patching one side or the other).
+built once per target. The release ships `amd64` and `arm64`; `amd64` is built
+natively, and arm64 by `build-deb-arm64.sh`, which does the whole thing:
+
+```bash
+sudo ./tools/deb/build-deb-arm64.sh      # -> dist/hikari_1.0.0_arm64.deb
+```
+
+It bootstraps an arm64 Ubuntu chroot under `qemu-user-static`, installs LLVM 22
+inside it, builds the plugin, packages it, and then installs and *runs* the
+result in the chroot — which is the only way to exercise an arm64 build on an
+x86_64 machine. A chroot rather than a cross-compile because an installed
+`LLVMExports.cmake` bakes in absolute paths, and the plugin has to link against
+the same `libLLVM` the host `opt` loads; inside the chroot both sides are the
+real thing at the real paths, so nothing has to be patched.
+
+It needs root (debootstrap, chroot, and the `/dev` bind mount that process
+substitution needs inside a chroot) and takes ten to twenty minutes, most of it
+qemu. Re-running is cheap: the emulated plugin build is keyed on a hash of the
+sources it compiles, so a change to the docs or to these scripts does not cost
+another one.
 
 Termux is a third shape and has its own tooling — see
 [`tools/termux/README.md`](../termux/README.md). It is **not** the arm64 package
