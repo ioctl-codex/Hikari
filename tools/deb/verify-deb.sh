@@ -43,7 +43,7 @@ note "driver: $(command -v hikari-clang) -> $(readlink -f "$(command -v hikari-c
 # The README ships in English now, and asserting that positively is more
 # robust than trying to detect leftover CJK text by byte range in whatever
 # locale grep happens to run under.
-grep -q 'An out-of-tree LLVM obfuscation pass plugin' /usr/share/doc/hikari/README.md ||
+grep -q 'An out-of-tree LLVM 22 obfuscation pass plugin' /usr/share/doc/hikari/README.md ||
     die "the installed README is not the translated one (stale package?)"
 note "docs:   /usr/share/doc/hikari/README.md (English)"
 note "build:  $(sed -n 's/^llvm-version: /llvm /p' /usr/lib/hikari/BUILD-INFO.txt 2>/dev/null)"

@@ -49,7 +49,16 @@ WORK_DIR="${WORK_DIR:-$HIKARI_ROOT/build-termux-cross}"
 OUT_DIR="${OUT_DIR:-$HIKARI_ROOT/dist}"
 VERSION="${VERSION:-1.0.0}"
 DEB_ARCH="${DEB_ARCH:-aarch64}"
-TERMUX_INDEX="${TERMUX_INDEX:-https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.xz}"
+# The index exists gzip-compressed and plain; the .xz name is a 404.  Guessing
+# one filename and hoping is a way for a build to break on a Tuesday, so the
+# candidates are tried in order and an explicit TERMUX_INDEX wins outright.
+TERMUX_INDEX_BASE="${TERMUX_INDEX_BASE:-https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64}"
+TERMUX_INDEX_CANDIDATES=(
+    "${TERMUX_INDEX:-}"
+    "$TERMUX_INDEX_BASE/Packages.gz"
+    "$TERMUX_INDEX_BASE/Packages"
+    "$TERMUX_INDEX_BASE/Packages.xz"
+)
 
 # Everything an on-device `pkg install llvm libllvm clang cmake ninja` brings,
 # plus the pieces LLVMExports.cmake insists on existing.  libllvm carries the
@@ -108,19 +117,33 @@ note "prefix: $PREFIX"
 # 21.1.8 becomes 21.1.9, and that what gets downloaded is what Termux publishes
 # for that version rather than whatever a URL happened to serve today.
 mkdir -p "$WORK_DIR/debs"
-note "index:  $TERMUX_INDEX"
-python3 - "$TERMUX_INDEX" "$WORK_DIR/debs/Packages" <<'PY'
-import lzma, sys, urllib.request
+python3 - "$WORK_DIR/debs/Packages" "${TERMUX_INDEX_CANDIDATES[@]}" <<'PY'
+import gzip, lzma, sys, urllib.request
 
-url, dest = sys.argv[1], sys.argv[2]
-with urllib.request.urlopen(url) as r:
-    raw = r.read()
-try:
-    raw = lzma.decompress(raw)
-except lzma.LZMAError:
-    pass
-open(dest, 'wb').write(raw)
-print('index: %d bytes -> %s' % (len(raw), dest))
+dest = sys.argv[1]
+problems = []
+for url in [u for u in sys.argv[2:] if u]:
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            raw = response.read()
+    except Exception as exc:
+        problems.append('%s (%s)' % (url, exc))
+        continue
+    for decode in (gzip.decompress, lzma.decompress, lambda b: b):
+        try:
+            raw = decode(raw)
+            break
+        except Exception:
+            continue
+    if not raw.lstrip().startswith(b'Package: '):
+        problems.append('%s (not a Packages file)' % url)
+        continue
+    with open(dest, 'wb') as fh:
+        fh.write(raw)
+    print('index: %s -> %s (%d bytes)' % (url, dest, len(raw)))
+    break
+else:
+    sys.exit('could not fetch a package index:\n  ' + '\n  '.join(problems))
 PY
 
 # ------------------------------------------------------------------ the tree ---
@@ -152,6 +175,8 @@ if fields.get('Package') != want:
 print(fields['Version'], fields['Filename'], fields['SHA256'])
 PY
 )
+    [[ -n "$version" && -n "$filename" && -n "$sha" ]] ||
+        die "could not resolve '$pkg' from the index (need a version, a filename and a sha256)"
     deb="$WORK_DIR/debs/$(basename "$filename")"
     if [[ ! -s "$deb" ]]; then
         note "fetch:  $pkg $version"
