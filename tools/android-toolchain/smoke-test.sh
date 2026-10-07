@@ -70,6 +70,35 @@ for p in "hikari(enable-splitobf)" "hikari(enable-bcfobf,enable-cffobf)" \
     fi
 done
 
+# The driver resolves its plugin, opt and runtime relative to its own path, so
+# the path it computes has to be the file's *real* one.  Reaching it through a
+# symlink is not exotic: a packaged install puts one in /usr/bin, and putting
+# the toolchain on PATH is the first thing a user does.  A driver that used the
+# symlink's own directory instead would look for the plugin in /usr/lib.
+echo
+echo "== 1b. the driver follows a symlink to itself =="
+# The lookups that matter here are the *relative* ones (../lib, ../llvm/bin),
+# so the driver has to be staged in the shape they are written for -- the shape
+# a packaged toolchain has, not a repo checkout, where the plugin lives in
+# build/ and HIKARI_PLUGIN has to say so.
+stage="$WORK/stage"
+mkdir -p "$stage/bin" "$stage/lib" "$stage/llvm/bin" "$stage/llvm/lib"
+cp "$W" "$stage/bin/hikari-clang"
+ln -sf "$PLUGIN" "$stage/lib/libHikari.so"
+ln -sf "$HIKARI_OPT" "$stage/llvm/bin/opt"
+ln -sf "$stage/bin/hikari-clang" "$WORK/hikari-clang-link"
+# HIKARI_PLUGIN and HIKARI_OPT are cleared on purpose: the smoke test exports
+# both for the checks above, and with them set the locators take the environment
+# value and the relative lookup -- the thing under test -- never runs.
+env -u HIKARI_PLUGIN -u HIKARI_OPT HIKARI_CC="$HIKARI_CC" \
+    "$WORK/hikari-clang-link" -O0 -c "$HIKARI_ROOT/samples/c/hello.c" \
+    -o "$WORK/linked.o" >/dev/null 2>&1
+if [[ $? -eq 0 ]]; then
+    ok "symlinked driver still finds its own plugin and opt"
+else
+    bad "symlinked driver could not find its plugin (did it resolve its own path?)"
+fi
+
 # ---------------------------------------------------------------- host run ---
 echo
 echo "== 2. host behaviour (clean vs obfuscated output) =="

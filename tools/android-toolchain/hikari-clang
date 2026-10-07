@@ -68,7 +68,23 @@ fi
 die() { printf 'hikari-clang: %s\n' "$*" >&2; exit 1; }
 log() { [[ "${HIKARI_VERBOSE:-0}" == "1" ]] && printf 'hikari-clang: %s\n' "$*" >&2; return 0; }
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Everything this driver needs is found relative to this file (../lib for the
+# plugin, ../llvm/bin/opt for opt), so the path it computes has to be the real
+# one and not the name it was called by.  A packaged install puts a symlink in
+# /usr/bin, and a user is just as likely to symlink the toolchain into their
+# PATH; following the link chain keeps both working.  `readlink -f` is not used
+# because BSD readlink has no -f, and macOS is a supported host.
+resolve_self() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [[ -L "$src" ]]; do
+        dir="$(cd -P "$(dirname "$src")" && pwd)"
+        src="$(readlink "$src")"
+        [[ "$src" == /* ]] || src="$dir/$src"
+    done
+    printf '%s' "$(cd -P "$(dirname "$src")" && pwd)"
+}
+
+SELF_DIR="$(resolve_self)"
 HIKARI_ROOT="${HIKARI_ROOT:-$(cd "$SELF_DIR/../.." && pwd)}"
 
 # ---------------------------------------------------------------- locators ---
