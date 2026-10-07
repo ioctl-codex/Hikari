@@ -45,6 +45,11 @@
 
 set -euo pipefail
 
+# The permissions inside a package should not be decided by whoever ran the
+# script.  GitHub's runners hand the shell umask 0000, which makes every `mkdir`
+# below produce 0777 -- and dpkg-deb then refuses the control directory outright.
+umask 022
+
 die() { printf 'build-deb: %s\n' "$*" >&2; exit 1; }
 note() { printf 'build-deb: %s\n' "$*" >&2; }
 
@@ -264,6 +269,11 @@ chmod 755 "$STAGE/DEBIAN/postinst"
 
 # ------------------------------------------------------------------ build -----
 command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb not found"
+
+# Belt and braces over the umask above: dpkg-deb rejects a control directory that
+# is not between 0755 and 0775, so normalise the staged directories whatever they
+# were created with rather than depending on how this script was invoked.
+find "$STAGE" -type d -exec chmod 755 {} +
 
 deb="$OUT_DIR/${NAME}_${VERSION}_${ARCH}.deb"
 rm -f "$deb"

@@ -30,6 +30,11 @@
 
 set -euo pipefail
 
+# dpkg-deb rejects a control directory that is not between 0755 and 0775, and
+# GitHub's runners hand the shell umask 0000, which makes `mkdir` produce 0777.
+# What is inside a package should not depend on who invoked the packager.
+umask 022
+
 die() { printf 'termux-deb: %s\n' "$*" >&2; exit 1; }
 note() { printf 'termux-deb: %s\n' "$*" >&2; }
 
@@ -139,6 +144,11 @@ EOF
 chmod 755 "$STAGE/DEBIAN/postinst"
 
 command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb not found (pkg install dpkg)"
+
+# Belt and braces over the umask above: the Termux prefix is meaningful to dpkg,
+# so normalise the staged directories rather than trusting what created them.
+find "$STAGE" -type d -exec chmod 755 {} +
+
 deb="$OUT_DIR/${NAME}_${VERSION}_${DEB_ARCH}.deb"
 rm -f "$deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$deb" || die "dpkg-deb --build failed"

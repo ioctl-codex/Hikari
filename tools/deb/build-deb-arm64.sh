@@ -26,6 +26,11 @@
 
 set -euo pipefail
 
+# The chroot inherits this, and so does everything built inside it.  A packaging
+# script that leaves the umask to the caller is one dpkg-deb rejection away from
+# failing on a machine it was never run on.
+umask 022
+
 die() { printf 'arm64-deb: %s\n' "$*" >&2; exit 1; }
 note() { printf 'arm64-deb: %s\n' "$*" >&2; }
 
